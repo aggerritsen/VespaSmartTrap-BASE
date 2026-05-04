@@ -37,6 +37,7 @@ const img=document.getElementById('frame');
 const canvas=document.getElementById('overlay');
 const ctx=canvas.getContext('2d');
 const names={0:'Apis mellifera',1:'Vespa crabro',2:'Vespula sp.',3:'Vespa velutina'};
+const classColors={0:'#e53935',1:'#f28c28',2:'#ffd21f',3:'#18d071'};
 let lastId=0,lastUrl='',lastInfo=null,inflight=false;
 function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
 function fitCanvas(){
@@ -61,13 +62,15 @@ function draw(){
   let x=b.x*sx,y=b.y*sy,w=b.w*sx,h=b.h*sy;
   x=clamp(x,0,canvas.width-1);y=clamp(y,0,canvas.height-1);
   w=clamp(w,1,canvas.width-x);h=clamp(h,1,canvas.height-y);
-  ctx.strokeStyle=lastInfo.inference.detection_match?'#18d071':'#19b7ff';
+  const color=classColors[lastInfo.inference.class_idx]||'#19b7ff';
+  ctx.strokeStyle=color;
   ctx.lineWidth=3;ctx.strokeRect(Math.round(x)+.5,Math.round(y)+.5,Math.round(w),Math.round(h));
   const label=(names[lastInfo.inference.class_idx]||('Class '+lastInfo.inference.class_idx))+' '+Math.round(lastInfo.inference.confidence*100)+'%';
   ctx.font='bold 16px Arial';ctx.textBaseline='top';
   const tw=Math.min(ctx.measureText(label).width+10,canvas.width);
   const lx=clamp(x,0,canvas.width-tw),ly=y>27?y-27:y+4;
   ctx.fillStyle='rgba(0,0,0,.82)';ctx.fillRect(lx,ly,tw,24);
+  ctx.fillStyle=color;ctx.fillRect(lx,ly,4,24);
   ctx.fillStyle='#fff';ctx.fillText(label,lx+5,ly+4);
 }
 async function tick(){

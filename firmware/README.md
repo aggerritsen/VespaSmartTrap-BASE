@@ -35,7 +35,7 @@ For more board details, see the [LilyGO T-SIM7080G repository](https://github.co
 | PlatformIO monitor | COM5, 115200 baud | Configured in `platformio.ini` |
 | GV2 UART RX | GPIO 16 default, Serial2 RX | Configurable via `/config.json` |
 | GV2 UART TX | GPIO 17 default, Serial2 TX | Configurable via `/config.json` |
-| GV2 UART baud | 921600 | 4096-byte RX/TX buffers |
+| GV2 UART baud | 921600 | 32 KB RX buffer for larger 4X JPEG bursts |
 | Modem RX | GPIO 4, Serial1 RX | SIM7080 AT interface |
 | Modem TX | GPIO 5, Serial1 TX | SIM7080 AT interface |
 | Modem PWRKEY | GPIO 41 | Pulsed if AT does not respond |

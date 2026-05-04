@@ -1,6 +1,7 @@
 param(
     [string]$CommitMessage = "",
     [string]$Remote = "origin",
+    [string[]]$SkipExternalRepos = @("gv2-firmware"),
     [switch]$SkipPull,
     [switch]$DryRun
 )
@@ -39,6 +40,11 @@ function Get-ExternalRepoPaths {
 
     if (Test-Path -LiteralPath "external") {
         Get-ChildItem -LiteralPath "external" -Directory | ForEach-Object {
+            if ($SkipExternalRepos -contains $_.Name) {
+                Write-Host "Skipping external repo by policy: $($_.Name)"
+                return
+            }
+
             $gitPath = Join-Path $_.FullName ".git"
             if (Test-Path -LiteralPath $gitPath) {
                 $paths += $_.FullName

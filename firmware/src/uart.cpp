@@ -23,6 +23,8 @@ static HardwareSerial Gv2Serial(2);
 
 static UartConfig active_config;
 static constexpr uint32_t MAX_JPEG_LEN = 512UL * 1024UL;
+static constexpr size_t GV2_UART_RX_BUFFER_SIZE = 32UL * 1024UL;
+static constexpr size_t GV2_UART_READ_CHUNK_SIZE = 2048;
 static constexpr const char *FRAME_LOG_PATH = "/frames.log";
 
 static const uint8_t JPEG_MAGIC[4] = {'V', 'S', 'T', 'J'};
@@ -532,11 +534,14 @@ bool gv2_uart_init(const UartConfig &config)
     if (active_config.baud == 0)
         active_config.baud = GV2_UART_BAUD_CFG;
 
+    size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
     Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
-    Serial.printf("POST: gv2_uart=Serial2 RX=%d TX=%d baud=%lu protocol=VSTJ/VSTS+CRC32\n",
+    Gv2Serial.setRxTimeout(1);
+    Serial.printf("POST: gv2_uart=Serial2 RX=%d TX=%d baud=%lu rx_buffer=%u protocol=VSTJ/VSTS+CRC32\n",
                   active_config.rx_gpio,
                   active_config.tx_gpio,
-                  (unsigned long)active_config.baud);
+                  (unsigned long)active_config.baud,
+                  (unsigned)rx_buffer);
     return true;
 }
 
@@ -550,7 +555,7 @@ void gv2_uart_poll()
         }
 
         if (jpeg_rx.receiving_jpeg) {
-            static uint8_t buf[512];
+            static uint8_t buf[GV2_UART_READ_CHUNK_SIZE];
             int available = Gv2Serial.available();
             if (available <= 0)
                 break;
