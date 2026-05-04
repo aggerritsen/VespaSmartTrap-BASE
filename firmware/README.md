@@ -1,206 +1,149 @@
-# SSCMA UART Receiver – T-SIM7080G-S3
+# T-SIM7080G-S3 Base Firmware
 
-This project implements the **T-SIM7080G-S3 base firmware** for VST-BASE. It receives AI inference results and JPEG frames from the **Grove Vision AI V2 stick-on module** over the custom PCB UART link, validates and acknowledges them, and stores images on an SD card with accurate timestamps derived from the cellular modem.
+This PlatformIO project contains the owned receiver firmware for the VST-BASE T-SIM7080G-S3 base unit.
 
----
+The firmware receives framed inference metadata and JPEG images from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes a POST log, validates incoming image frames, saves valid JPEGs, and acknowledges completed frames.
+
+## Hardware Role
+
+```text
+Grove Vision AI V2 stick-on module
+        |
+        | UART2, 921600 baud, custom PCB
+        v
+T-SIM7080G-S3 base firmware
+        |
+        +-- SIM7080 modem time
+        +-- SIM7080 GNSS probe
+        +-- SD-MMC image and POST logging
+        +-- USB serial POST/heartbeat monitor
+```
+
 ## Board Pinout
 
 ![LILYGO T-SIM7080G-S3 Pinout](../docs/hardware/Lilygo_T_SIM7080G_S3_PINOUT.jpg)
 
-*Pinout diagram for the LILYGO T-SIM7080G-S3.*
-For more details on the hardware and board documentation, see the
-[LilyGO T-SIM7080G GitHub Repository](https://github.com/Xinyuan-LilyGO/LilyGo-T-SIM7080G).
+For more board details, see the [LilyGO T-SIM7080G repository](https://github.com/Xinyuan-LilyGO/LilyGo-T-SIM7080G).
 
+## Pins And Ports
 
-## Overview
+| Function | Pin / Port | Notes |
+| --- | --- | --- |
+| USB serial monitor | COM5, 115200 baud | POST and heartbeat output |
+| PlatformIO monitor | COM3, 115200 baud | Configured in `platformio.ini` |
+| GV2 UART RX | GPIO 18, UART2 RX | Receives data from stick-on module |
+| GV2 UART TX | GPIO 17, UART2 TX | Sends ACK lines back |
+| GV2 UART baud | 921600 | 4096-byte RX/TX buffers |
+| Modem RX | GPIO 4, Serial1 RX | SIM7080 AT interface |
+| Modem TX | GPIO 5, Serial1 TX | SIM7080 AT interface |
+| Modem PWRKEY | GPIO 41 | Pulsed if AT does not respond |
+| PMU SDA | GPIO 15 | AXP2101 I2C |
+| PMU SCL | GPIO 7 | AXP2101 I2C |
+| SD CMD | GPIO 39 | SD-MMC 1-bit mode |
+| SD CLK | GPIO 38 | SD-MMC 1-bit mode |
+| SD DATA | GPIO 40 | SD-MMC 1-bit mode |
 
-The firmware performs the following tasks:
+## Boot Flow
 
-* Initializes PMU power rails and the SIM7080G modem
-* Retrieves network time from the modem and sets system RTC
-* Listens on a high‑speed UART (921600 baud) for framed data
-* Parses inference metadata (JSON)
-* Receives Base64‑encoded JPEG images with CRC validation
-* Decodes and sanity‑checks JPEG data
-* Saves images to SD card using sequential frame IDs
-* Sends ACK responses back to the sender
+On startup, `setup()` performs:
 
-The system is optimized for **robust, streaming operation** with explicit state handling and integrity checks.
+1. Starts USB serial and prints system information.
+2. Enables modem rails through the AXP2101 PMU.
+3. Probes the SIM7080 with AT commands.
+4. Enables modem network time commands and waits for registration.
+5. Reads `AT+CCLK?` into `YYYYMMDD_HHMMSS` format and sets system time if valid.
+6. Powers GNSS with `AT+CGNSPWR=1` and samples `AT+CGNSINF` for up to 10 seconds.
+7. Initializes UART2 for the GV2 link.
+8. Initializes SD-MMC with custom T-SIM7080G-S3 pins.
+9. Writes `/post.log` to the SD card when the card is available.
+10. Prints a POST summary and enters receive mode.
 
----
+Every 5 seconds the loop prints a heartbeat with frame state, byte/line counters, heap, modem, time, GNSS, UART, and SD status.
 
-## Hardware
+## UART Protocol
 
-* **Board:** LILYGO T‑SIM7080G‑S3 (ESP32‑S3)
-* **Modem:** SIM7080G (LTE‑M / NB‑IoT)
-* **PMU:** AXP2101
-* **SD card:** SD‑MMC (1‑bit mode)
-* **Attached module:** Grove Vision AI V2 stick-on module through the custom PCB
+The receiver expects newline-delimited ASCII control lines and a fixed-length Base64 image payload.
 
-### UART Connections
-
-| Function  | ESP32‑S3 Pin | UART     |
-| --------- | ------------ | -------- |
-| GV2 RX    | GPIO 18      | UART2 RX |
-| GV2 TX    | GPIO 17      | UART2 TX |
-| Baudrate  | –            | 921600   |
-
-### Modem & PMU Wiring
-
-| Function     | Pin     |
-| ------------ | ------- |
-| Modem RX     | GPIO 4  |
-| Modem TX     | GPIO 5  |
-| Modem PWRKEY | GPIO 41 |
-| PMU SDA      | GPIO 15 |
-| PMU SCL      | GPIO 7  |
-
-### SD‑MMC Pins
-
-| Signal | Pin     |
-| ------ | ------- |
-| CMD    | GPIO 39 |
-| CLK    | GPIO 38 |
-| DATA   | GPIO 40 |
-
----
-
-## Data Protocol (UART)
-
-The GV2 stick-on module sends data in **framed ASCII lines**:
-
-### 1. JSON metadata
-
-```
-JSON {"frame":123,"label":"hornet","score":0.94,...}
-```
-
-### 2. Image header
-
-```
+```text
+JSON {"frame":123,"label":"hornet","score":0.94}
 IMAGE <base64_length> <crc32_hex>
-```
-
-### 3. Base64 image payload
-
-```
-<base64 JPEG data (exact length)>
-```
-
-### 4. Frame end
-
-```
+<base64 JPEG payload, exactly base64_length bytes>
 END
 ```
 
-### 5. Acknowledgement (sent back)
+The receiver replies only after a valid frame reaches `END`:
 
-```
+```text
 ACK <frame_id>
 ```
 
----
+The `frame_id` is extracted with a simple search for the `"frame":` field in the JSON text. The JSON is currently stored and printed as text; it is not parsed with ArduinoJson.
 
-## Runtime State Machine
+## Receive State Machine
 
-The receiver operates as a strict state machine:
+| State | Responsibility |
+| --- | --- |
+| `WAIT_JSON` | Wait for a line beginning with `JSON ` |
+| `WAIT_IMAGE_HEADER` | Read `IMAGE <length> <crc>` |
+| `READ_IMAGE` | Accumulate exactly the declared Base64 payload length |
+| `WAIT_END` | Wait for `END`, validate, save, ACK, then reset |
 
-1. **WAIT_JSON** – waits for inference metadata
-2. **WAIT_IMAGE_HEADER** – reads expected image length + CRC
-3. **READ_IMAGE** – accumulates Base64 data
-4. **WAIT_END** – validates CRC, decodes, saves, ACKs
+A new `JSON ` line globally resynchronizes the receiver and starts a fresh frame.
 
-Any failure resets the frame state cleanly.
+## Validation
 
----
+Before saving an image, the firmware checks:
 
-## Time Synchronization
+- CRC32 over the Base64 payload using `esp_crc32_le`.
+- Base64 decode using mbedTLS.
+- JPEG markers: SOI `FFD8`, SOS `FFDA`, and EOI `FFD9`.
+- SD card availability.
 
-On boot:
-
-1. PMU powers modem rails
-2. Modem responds to AT
-3. Network registration is verified
-4. `AT+CCLK?` is queried
-5. Timestamp is converted to:
-
-```
-YYYYMMDD_HHMMSS
-```
-
-6. System RTC is set via `settimeofday()`
-
-Console output is **exactly**:
-
-```
-🕒 SYSTEM TIME SET: YYYY-MM-DD HH:MM:SS
-```
-
-This timestamp is used implicitly for file creation and logging.
-
----
-
-## Image Validation
-
-Before saving, each image is validated by:
-
-* **CRC32** check on Base64 payload
-* **Base64 decode** via mbedTLS
-* **JPEG sanity scan**:
-
-  * SOI marker (0xFFD8)
-  * SOS marker (0xFFDA)
-  * EOI marker (0xFFD9)
-
-Only valid images are written to disk.
-
----
+Invalid frames are discarded and do not receive an ACK.
 
 ## SD Card Output
 
-Images are stored at the SD root as:
+The firmware writes:
 
-```
+```text
+/post.log
 /frame_000123.jpg
 ```
 
-* Sequential numbering from `frame` field
-* Written atomically per frame
-* Logged with size confirmation
+`/post.log` is overwritten at boot. JPEG filenames use the frame number from the JSON metadata.
 
----
+## Build And Flash
+
+```powershell
+cd firmware
+.\run.ps1
+```
+
+`run.ps1` uploads to COM5 by default, then opens the serial monitor on COM5 at 115200 baud unless different ports are passed:
+
+```powershell
+.\run.ps1 -UploadPort COM5 -MonitorPort COM5
+```
 
 ## Source Files
 
-| File         | Responsibility                                   |
-| ------------ | ------------------------------------------------ |
-| `main.cpp`   | UART receiver, protocol handling, image pipeline |
-| `modem.cpp`  | PMU control, modem init, network time            |
-| `modem.h`    | Modem API                                        |
-| `sdcard.cpp` | SD‑MMC init and JPEG storage                     |
-| `sdcard.h`   | SD card API                                      |
+| File | Responsibility |
+| --- | --- |
+| `src/main.cpp` | POST reporting, UART2 setup, receive state machine, CRC/Base64/JPEG validation, ACKs, heartbeat |
+| `src/modem.cpp` | AXP2101 rails, SIM7080 AT readiness, network time, GNSS probe |
+| `src/modem.h` | Modem API and GNSS data structure |
+| `src/sdcard.cpp` | SD-MMC custom pin setup, `/post.log`, JPEG writing |
+| `src/sdcard.h` | SD card API |
+| `platformio.ini` | ESP32-S3 build, serial ports, PSRAM, 16 MB flash, dependencies |
+| `huge_app.csv` | Partition table |
 
----
+## Dependencies
 
-## Libraries Used
+- Arduino ESP32 core
+- TinyGSM for SIM7080 AT support
+- XPowersLib for AXP2101 PMU control
+- SD_MMC from the ESP32 Arduino core
+- mbedTLS Base64
+- ESP-IDF UART and CRC helpers through the Arduino build
 
-* Arduino ESP32 Core
-* TinyGSM (SIM7080)
-* XPowersLib (AXP2101)
-* SD_MMC
-* mbedTLS (Base64)
-
----
-
-## Notes
-
-* Designed for **continuous unattended operation**
-* Safe against partial frames and CRC mismatches
-* No dynamic protocol assumptions
-* High‑baud UART tested (921600)
-
----
-
-## License
-
-Project‑specific / internal use (add license as required).
+`ArduinoJson` is listed in `platformio.ini` but is not currently used by `src/`.
