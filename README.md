@@ -56,20 +56,6 @@ Classes:       Apis mellifera, Vespa crabro, Vespa velutina
 
 Large model binaries should stay in the GV2 firmware submodule unless explicitly copied here for release packaging.
 
-## First Setup
-
-After this folder is created, run:
-
-```powershell
-.\create_github_repo.ps1
-```
-
-To also create the GitHub repository with GitHub CLI:
-
-```powershell
-.\create_github_repo.ps1 -Owner <github-owner> -CreateRemote -Visibility private
-```
-
 ## Build Receiver
 
 ```powershell
