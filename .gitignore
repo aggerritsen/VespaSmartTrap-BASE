@@ -1,0 +1,24 @@
+.pio/
+.vscode/
+.venv/
+__pycache__/
+*.pyc
+
+# PlatformIO / firmware build output
+firmware/**/.pio/
+firmware/**/.vscode/
+
+# Local serial/log/runtime output
+*.log
+logs/
+__azurite_db_*.json
+AzuriteConfig
+__queuestorage__/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+
+# Large datasets stay opt-in
+data/sample-images/**
+!data/sample-images/.gitkeep

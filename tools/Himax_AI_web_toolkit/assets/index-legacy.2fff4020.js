@@ -1,0 +1,1 @@
+System.register(["./arco-legacy.e274f5da.js","./vue-legacy.77c02482.js"],(function(e,t){"use strict";var a,r,s,c,n;return{setters:[e=>{a=e.d,r=e.D,s=e.C},e=>{c=e.g,n=e.f}],execute:function(){e("default",a({__name:"index",setup(e){const t=c(),a=n().params.path;return t.replace({path:a}),(e,t)=>(s(),r("div"))}}))}}}));

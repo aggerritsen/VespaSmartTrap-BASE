@@ -1,0 +1,13 @@
+{
+  "target": "Grove Vision AI V2",
+  "firmware_submodule": "external/gv2-firmware",
+  "model_folder_in_submodule": "model_zoo/tflm_yolo11_od",
+  "default_model": "yolo11n_vespa_2026-02v1_allpxNULL_full_integer_quant_vela.tflite",
+  "flash_offset": "0xB7B000",
+  "classes": [
+    "Apis mellifera",
+    "Vespa crabro",
+    "Vespa velutina"
+  ],
+  "notes": "Model binaries are provided by the GV2 firmware submodule unless explicitly copied here for release packaging."
+}

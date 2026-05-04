@@ -1,0 +1,4 @@
+[submodule "external/t-sim-motor-shield"]
+	path = external/t-sim-motor-shield
+	url = https://github.com/aggerritsen/T-SIMMotorShield.git
+	branch = master
