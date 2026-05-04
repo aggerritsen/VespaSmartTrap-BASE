@@ -6,7 +6,3 @@
 	path = external/t-sim-motor-shield
 	url = https://github.com/aggerritsen/T-SIMMotorShield.git
 	branch = master
-[submodule "external/esp32-s3-gv2-uart-reciever"]
-	path = external/esp32-s3-gv2-uart-reciever
-	url = https://github.com/marcory-hub/vespa_smart_trap.git
-	branch = main
