@@ -2,7 +2,7 @@
 
 This PlatformIO project contains the owned receiver firmware for the VST-BASE T-SIM7080G-S3 base unit.
 
-The firmware receives binary inference state and JPEG frames from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes a POST log, streams valid JPEG frames to SD, and leaves actuator action deferred until the rest of the flow is ready.
+The firmware receives binary inference state and JPEG frames from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes POST/frame logs, validates inference/JPEG frames, runs the configured stepper actuator cycle after consecutive matching detections, and saves matching JPEGs to SD.
 
 ## Hardware Role
 
@@ -31,7 +31,7 @@ For more board details, see the [LilyGO T-SIM7080G repository](https://github.co
 | Function | Pin / Port | Notes |
 | --- | --- | --- |
 | USB serial monitor | COM5, 115200 baud | POST and heartbeat output |
-| PlatformIO monitor | COM3, 115200 baud | Configured in `platformio.ini` |
+| PlatformIO monitor | COM5, 115200 baud | Configured in `platformio.ini` |
 | GV2 UART RX | GPIO 16 default, Serial2 RX | Configurable via `/config.json` |
 | GV2 UART TX | GPIO 17 default, Serial2 TX | Configurable via `/config.json` |
 | GV2 UART baud | 921600 | 4096-byte RX/TX buffers |
@@ -67,10 +67,10 @@ On startup, `setup()` performs:
 10. Initializes the TB6612FNG stepper output.
 11. Writes `/post.log` to the SD card when the card is available.
 12. Prints a POST summary.
-13. Runs one stepper POST test cycle: configured rotation forward, waits 1 second, configured rotation reverse.
+13. Runs one stepper POST test cycle: configured rotation forward, waits `reverse_wait_ms`, configured rotation reverse.
 14. Enters receive mode.
 
-Every 5 seconds the loop prints a diagnostic heartbeat with heap, modem, time, GNSS, UART, SD, and receive counters. GV2 receive output is event-driven: the important line is printed when a JPEG frame has fully arrived and has been saved.
+Every 5 seconds the loop prints a diagnostic heartbeat with heap, modem, time, GNSS, UART, SD, and receive counters. GV2 receive output is event-driven: the important line is printed when a JPEG frame has fully arrived and has been validated, filtered, optionally actuated, and optionally saved.
 
 ## UART Protocol
 
@@ -93,7 +93,7 @@ The JPEG header contains the best detection box from the GV2 inference result. T
 | Magic scan | Wait for `VSTS` or `VSTJ` |
 | State frame | Read one state byte and update diagnostics |
 | JPEG header | Read state, class, confidence, bounding box, payload length, and CRC32 |
-| JPEG payload | Read exactly the declared JPEG bytes into RAM, validate CRC32, save, and append `/frames.log` |
+| JPEG payload | Read exactly the declared JPEG bytes into RAM, validate CRC32/JPEG structure, update the consecutive detection count, actuate and save only on a configured detection match, and append `/frames.log` |
 
 The parser continuously scans for magic bytes when idle, so it can resynchronize after noise or a discarded invalid frame.
 
@@ -124,7 +124,7 @@ The firmware writes:
 
 `/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `src/version.h`. `/frames.log` is appended as JSON Lines. JPEG filenames use the known system timestamp plus a local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
 
-Each `/frames.log` line records timestamp, GNSS coordinates, inference state/class/confidence, configured inference filter, detection match result, bounding box, JPEG length, CRC, saved filename, current actuator settings, device name, CPU make/model, and software version.
+Each `/frames.log` line records timestamp, GNSS coordinates, inference state/class/confidence, configured inference filter, occurrence count, detection match result, bounding box, JPEG length, CRC, saved filename, current actuator settings, actuator activation result, device name, CPU make/model, and software version.
 
 The stepper settings currently used are:
 
