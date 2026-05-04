@@ -9,6 +9,7 @@
 #include "stepper.h"
 #include "uart.h"
 #include "version.h"
+#include "web.h"
 
 static char g_timestamp[32] = {0};
 
@@ -466,6 +467,9 @@ void setup()
     bool config_loaded = sdcard_load_config(g_config);
     print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
 
+    bool web_started = web_init(g_config.web);
+    print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
+
     g_post.gv2_uart = gv2_uart_init(g_config.uart);
     gv2_uart_set_log_context(&g_config, &g_gnss);
     print_post_line("gv2_uart", g_post.gv2_uart);
@@ -483,5 +487,6 @@ void setup()
 void loop()
 {
     gv2_uart_poll();
+    web_loop();
     print_idle_heartbeat();
 }

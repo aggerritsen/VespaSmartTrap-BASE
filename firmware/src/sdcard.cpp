@@ -41,12 +41,18 @@ static const char *DEFAULT_CONFIG =
     "    \"steps_per_revolution\": 2048,\n"
     "    \"reverse_wait_ms\": 1000\n"
     "  },\n"
-  "  \"inference\": {\n"
-  "    \"confidence_threshold\": 0.0,\n"
-  "    \"detected_class\": -1,\n"
-  "    \"occurrence\": 1\n"
-  "  }\n"
-  "}\n";
+    "  \"inference\": {\n"
+    "    \"confidence_threshold\": 0.0,\n"
+    "    \"detected_class\": -1,\n"
+    "    \"occurrence\": 1\n"
+    "  },\n"
+    "  \"web\": {\n"
+    "    \"mode\": 2,\n"
+    "    \"ssid\": \"VST-BASE\",\n"
+    "    \"password\": \"\",\n"
+    "    \"append_mac\": true\n"
+    "  }\n"
+    "}\n";
 
 static const char *sd_card_type_name(uint8_t type)
 {
@@ -240,7 +246,17 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.inference.occurrence == 0)
         config.inference.occurrence = 1;
 
-    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u\n",
+    JsonObject web = doc["web"];
+    config.web.mode = web["mode"] | config.web.mode;
+    const char *web_ssid = web["ssid"] | config.web.ssid;
+    const char *web_password = web["password"] | config.web.password;
+    strlcpy(config.web.ssid, web_ssid, sizeof(config.web.ssid));
+    strlcpy(config.web.password, web_password, sizeof(config.web.password));
+    config.web.append_mac = web["append_mac"] | config.web.append_mac;
+    if (config.web.mode > 2)
+        config.web.mode = 0;
+
+    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s\n",
                   config.device_name,
                   config.uart.rx_gpio,
                   config.uart.tx_gpio,
@@ -251,7 +267,9 @@ bool sdcard_load_config(BaseConfig &config)
                   config.stepper.reverse_wait_ms,
                   config.inference.confidence_threshold,
                   config.inference.detected_class,
-                  config.inference.occurrence);
+                  config.inference.occurrence,
+                  config.web.mode,
+                  config.web.ssid);
 
     return true;
 }

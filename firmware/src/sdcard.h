@@ -20,11 +20,19 @@ struct InferenceConfig {
     uint16_t occurrence = 1;
 };
 
+struct WebConfig {
+    uint8_t mode = 2; // 0=off, 1=station, 2=access point
+    char ssid[33] = "VST-BASE";
+    char password[65] = "";
+    bool append_mac = true;
+};
+
 struct BaseConfig {
     char device_name[32] = "vst-base";
     UartConfig uart;
     StepperConfig stepper;
     InferenceConfig inference;
+    WebConfig web;
 };
 
 bool sdcard_init();

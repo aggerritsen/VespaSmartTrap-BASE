@@ -16,6 +16,7 @@ T-SIM7080G-S3 base firmware
         +-- SIM7080 modem time
         +-- SIM7080 GNSS probe
         +-- SD-MMC image and POST logging
+        +-- WiFi HTTP image and inference view
         +-- TB6612FNG stepper actuator output
         +-- USB serial POST/heartbeat monitor
 ```
@@ -65,10 +66,11 @@ On startup, `setup()` performs:
 8. Initializes SD-MMC with custom T-SIM7080G-S3 pins.
 9. Ensures `/config.json` exists and loads stepper settings.
 10. Initializes the TB6612FNG stepper output.
-11. Writes `/post.log` to the SD card when the card is available.
-12. Prints a POST summary.
-13. Runs one stepper POST test cycle: configured rotation forward, waits `reverse_wait_ms`, configured rotation reverse.
-14. Enters receive mode.
+11. Starts the WiFi web service when enabled in config.
+12. Writes `/post.log` to the SD card when the card is available.
+13. Prints a POST summary.
+14. Runs one stepper POST test cycle: configured rotation forward, waits `reverse_wait_ms`, configured rotation reverse.
+15. Enters receive mode.
 
 Every 5 seconds the loop prints a diagnostic heartbeat with heap, modem, time, GNSS, UART, SD, and receive counters. GV2 receive output is event-driven: the important line is printed when a JPEG frame has fully arrived and has been validated, filtered, optionally actuated, and optionally saved.
 
@@ -84,7 +86,7 @@ JPEG frame:
 VSTJ + state_u8 + class_idx_u8 + conf_u8 + bbox_x_u16_le + bbox_y_u16_le + bbox_w_u16_le + bbox_h_u16_le + jpeg_len_u32_le + crc32_u32_le + jpeg_bytes
 ```
 
-The JPEG header contains the best detection box from the GV2 inference result. The length is the trimmed JPEG payload length through the real `FFD9` marker. CRC32 is computed over exactly those JPEG bytes. The receiver prints completion output only after all `jpeg_len_u32_le` payload bytes are received, the CRC matches, and the configured inference filter has been evaluated.
+The JPEG header contains the best detection box from the GV2 inference result as `x,y,w,h` coordinates. The length is the trimmed JPEG payload length through the real `FFD9` marker. CRC32 is computed over exactly those JPEG bytes. The receiver prints completion output only after all `jpeg_len_u32_le` payload bytes are received, the CRC matches, and the configured inference filter has been evaluated.
 
 ## Receive State Machine
 
@@ -109,7 +111,7 @@ Before saving an image, the firmware checks:
 - The class/confidence filter has matched for `inference.occurrence` consecutive valid frames.
 - SD card availability.
 
-Invalid frames and non-matching detections are logged but not saved. Once the configured consecutive occurrence count is reached, the receiver runs the configured stepper actuator cycle first, then saves the JPEG.
+Invalid frames and non-matching detections are logged but not saved. Once the configured consecutive occurrence count is reached, the receiver runs the configured stepper actuator cycle first, flushes and resynchronizes the GV2 UART stream after the blocking actuator cycle, then saves the triggering JPEG. The detection occurrence counter is reset after a completed actuator event so a fresh run of consecutive matches is required before the next cycle.
 
 ## SD Card Output
 
@@ -156,6 +158,21 @@ UART pins can also be changed without rebuilding:
 }
 ```
 
+The web service is enabled as an access point by default. `mode` is `0` off, `1` WiFi station, or `2` access point:
+
+```json
+{
+  "web": {
+    "mode": 2,
+    "ssid": "VST-BASE",
+    "password": "",
+    "append_mac": true
+  }
+}
+```
+
+When enabled, open the IP printed as `WEB: ... ip=...` in the serial monitor. The page polls `/state.json` for inference metadata and fetches `/frame.jpg` only when a new verified frame id arrives, keeping the display path binary JPEG instead of base64. CRC-bad or structurally invalid JPEGs are logged but do not replace the last good web frame.
+
 The default `steps_per_revolution` is `2048` for a 28BYJ-48 in full-step mode. The POST test cycle runs the configured rotation forward, waits `reverse_wait_ms`, then reverses by the same amount. `inference.confidence_threshold` is a `0.0` to `1.0` threshold, `inference.detected_class` is the target class index, and `inference.occurrence` is the number of consecutive matching detections required before actuation and saving. Use `-1` for `detected_class` to accept any class.
 
 ## Build And Flash
@@ -184,6 +201,8 @@ cd firmware
 | `src/stepper.h` | Stepper API |
 | `src/uart.cpp` | GV2 Serial2 binary `VSTS`/`VSTJ` receiver and JPEG streaming |
 | `src/uart.h` | GV2 UART API and receive statistics |
+| `src/web.cpp` | WiFi HTTP service serving latest JPEG, overlay page, and inference JSON |
+| `src/web.h` | Web service API and published frame metadata |
 | `src/version.h` | Software name and version used in POST and frame logs |
 | `platformio.ini` | ESP32-S3 build, serial ports, PSRAM, 16 MB flash, dependencies |
 | `huge_app.csv` | Partition table |
@@ -194,5 +213,6 @@ cd firmware
 - TinyGSM for SIM7080 AT support
 - XPowersLib for AXP2101 PMU control
 - SD_MMC from the ESP32 Arduino core
+- WiFi and WebServer from the ESP32 Arduino core
 - ArduinoJson for `/config.json`
 - ESP-IDF helpers through the Arduino build

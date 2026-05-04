@@ -7,6 +7,7 @@
 #include "version.h"
 #include "sdcard.h"
 #include "stepper.h"
+#include "web.h"
 
 #ifndef GV2_UART_RX_GPIO_CFG
   #define GV2_UART_RX_GPIO_CFG 16
@@ -158,6 +159,43 @@ static void abort_active_jpeg()
     jpeg_rx.legacy_prefix_len = 0;
 }
 
+static void reset_uart_sync_windows()
+{
+    memset(jpeg_rx.magic_window, 0, sizeof(jpeg_rx.magic_window));
+    jpeg_rx.magic_filled = 0;
+    memset(state_rx.magic_window, 0, sizeof(state_rx.magic_window));
+    state_rx.magic_filled = 0;
+    jpeg_rx.waiting_jpeg_header = false;
+    jpeg_rx.legacy_prefix_len = 0;
+}
+
+static uint32_t flush_gv2_uart_until_quiet(uint32_t quiet_ms, uint32_t max_ms)
+{
+    uint32_t discarded = 0;
+    uint32_t start_ms = millis();
+    uint32_t last_byte_ms = millis();
+
+    while (millis() - start_ms < max_ms) {
+        int available = Gv2Serial.available();
+        if (available > 0) {
+            while (Gv2Serial.available() > 0) {
+                Gv2Serial.read();
+                discarded++;
+            }
+            last_byte_ms = millis();
+            continue;
+        }
+
+        if (millis() - last_byte_ms >= quiet_ms)
+            break;
+
+        delay(1);
+    }
+
+    reset_uart_sync_windows();
+    return discarded;
+}
+
 static size_t jpeg_payload_len(const uint8_t *buf, size_t declared_len)
 {
     if (!buf || declared_len < 4)
@@ -176,25 +214,50 @@ static size_t jpeg_payload_len(const uint8_t *buf, size_t declared_len)
 
 static bool jpeg_sanity_check(const uint8_t *buf, size_t len)
 {
-    if (!buf || len < 4)
+    if (!buf || len < 6)
         return false;
 
-    bool found_sos = false;
-    for (size_t i = 2; i + 1 < len; i++) {
-        if (buf[i] != 0xFF)
-            continue;
+    if (buf[0] != 0xFF || buf[1] != 0xD8)
+        return false;
+    if (buf[len - 2] != 0xFF || buf[len - 1] != 0xD9)
+        return false;
 
-        uint8_t marker = buf[i + 1];
+    size_t i = 2;
+    while (i + 1 < len) {
+        if (buf[i] != 0xFF)
+            return false;
+
+        while (i < len && buf[i] == 0xFF)
+            i++;
+        if (i >= len)
+            return false;
+
+        uint8_t marker = buf[i++];
         if (marker == 0x00)
-            continue;
+            return false;
 
         if (marker == 0xDA) {
-            found_sos = true;
-            break;
+            if (i + 2 > len)
+                return false;
+            uint16_t segment_len = ((uint16_t)buf[i] << 8) | buf[i + 1];
+            return segment_len >= 2 && i + segment_len <= len - 2;
         }
+
+        if (marker == 0xD9)
+            return false;
+        if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+            continue;
+
+        if (i + 2 > len)
+            return false;
+        uint16_t segment_len = ((uint16_t)buf[i] << 8) | buf[i + 1];
+        if (segment_len < 2 || i + segment_len > len)
+            return false;
+
+        i += segment_len;
     }
 
-    return found_sos;
+    return false;
 }
 
 static void start_jpeg_frame()
@@ -514,7 +577,7 @@ void gv2_uart_poll()
                     : 0;
                 bool crc_ok = !jpeg_rx.frame_has_crc32 ||
                     (payload_len == jpeg_rx.frame_len && crc_actual == jpeg_rx.frame_crc32);
-                bool valid = crc_ok && jpeg_sanity_check(jpeg_rx.jpeg_buf, payload_len);
+                bool valid = jpeg_rx.frame_has_crc32 && crc_ok && jpeg_sanity_check(jpeg_rx.jpeg_buf, payload_len);
                 bool filter_match = frame_matches_class_and_confidence(valid);
                 if (filter_match) {
                     if (jpeg_rx.detection_streak < UINT16_MAX)
@@ -531,6 +594,12 @@ void gv2_uart_poll()
 
                 if (detection_match) {
                     actuated = stepper_run_configured_cycle();
+                    uint32_t discarded = flush_gv2_uart_until_quiet(100, 1200);
+                    if (discarded > 0) {
+                        Serial.printf("GV2: resync after actuator discarded=%lu bytes\n",
+                                      (unsigned long)discarded);
+                    }
+
                     saved = sdcard_save_jpeg(jpeg_rx.image_counter,
                                              jpeg_rx.jpeg_buf,
                                              payload_len,
@@ -542,6 +611,29 @@ void gv2_uart_poll()
                     stats.jpeg_invalid++;
 
                 append_frame_log(saved, valid, filter_match, detection_match, actuated, crc_ok, crc_actual, payload_len, saved ? filename : "");
+
+                WebFrameInfo web_info;
+                web_info.frame_id = jpeg_rx.image_counter;
+                web_info.state = jpeg_rx.frame_state;
+                web_info.class_idx = jpeg_rx.frame_class_idx;
+                web_info.confidence_u8 = jpeg_rx.frame_conf_u8;
+                web_info.bbox_x = jpeg_rx.frame_bbox_x;
+                web_info.bbox_y = jpeg_rx.frame_bbox_y;
+                web_info.bbox_w = jpeg_rx.frame_bbox_w;
+                web_info.bbox_h = jpeg_rx.frame_bbox_h;
+                web_info.jpeg_len = (uint32_t)payload_len;
+                web_info.crc_rx = jpeg_rx.frame_crc32;
+                web_info.crc_calc = crc_actual;
+                web_info.crc_ok = crc_ok;
+                web_info.valid = valid;
+                web_info.filter_match = filter_match;
+                web_info.detection_match = detection_match;
+                web_info.saved = saved;
+                web_info.actuated = actuated;
+                web_info.occurrence_count = jpeg_rx.detection_streak;
+                web_info.occurrence_required = occurrence;
+                if (valid)
+                    web_publish_frame(jpeg_rx.jpeg_buf, payload_len, web_info);
 
                 jpeg_rx.receiving_jpeg = false;
                 stats.jpeg_frames++;
@@ -573,6 +665,8 @@ void gv2_uart_poll()
                               jpeg_rx.frame_len >= 2 ? jpeg_rx.jpeg_buf[1] : 0,
                               payload_len >= 2 ? jpeg_rx.jpeg_buf[payload_len - 2] : 0,
                               payload_len >= 2 ? jpeg_rx.jpeg_buf[payload_len - 1] : 0);
+                if (detection_match)
+                    jpeg_rx.detection_streak = 0;
                 free(jpeg_rx.jpeg_buf);
                 jpeg_rx.jpeg_buf = nullptr;
                 jpeg_rx.jpeg_offset = 0;
