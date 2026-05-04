@@ -22,3 +22,5 @@ Thumbs.db
 # Large datasets stay opt-in
 data/sample-images/**
 !data/sample-images/.gitkeep
+
+create_github_repo.ps1
