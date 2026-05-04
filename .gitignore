@@ -5,8 +5,8 @@ __pycache__/
 *.pyc
 
 # PlatformIO / firmware build output
-firmware/**/.pio/
-firmware/**/.vscode/
+firmware/.pio/
+firmware/.vscode/
 
 # Local serial/log/runtime output
 *.log

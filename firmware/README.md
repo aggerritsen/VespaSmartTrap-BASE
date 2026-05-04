@@ -1,11 +1,11 @@
 # SSCMA UART Receiver – T-SIM7080G-S3
 
-This project implements a **high‑speed UART receiver and image logger** for an ESP32‑S3–based **LILYGO T‑SIM7080G‑S3** board. It is designed to receive AI inference results and JPEG frames from an external **SSCMA / Vision AI module** over UART, validate and acknowledge them, and store the images on an SD card with accurate timestamps derived from the cellular modem.
+This project implements the **T-SIM7080G-S3 base firmware** for VST-BASE. It receives AI inference results and JPEG frames from the **Grove Vision AI V2 stick-on module** over the custom PCB UART link, validates and acknowledges them, and stores images on an SD card with accurate timestamps derived from the cellular modem.
 
 ---
 ## Board Pinout
 
-![LILYGO T-SIM7080G-S3 Pinout](../docs/Lilygo_T_SIM7080G_S3_PINOUT.jpg)
+![LILYGO T-SIM7080G-S3 Pinout](../docs/hardware/Lilygo_T_SIM7080G_S3_PINOUT.jpg)
 
 *Pinout diagram for the LILYGO T-SIM7080G-S3.*
 For more details on the hardware and board documentation, see the
@@ -35,14 +35,14 @@ The system is optimized for **robust, streaming operation** with explicit state 
 * **Modem:** SIM7080G (LTE‑M / NB‑IoT)
 * **PMU:** AXP2101
 * **SD card:** SD‑MMC (1‑bit mode)
-* **External device:** SSCMA / Vision AI module (UART output)
+* **Attached module:** Grove Vision AI V2 stick-on module through the custom PCB
 
 ### UART Connections
 
 | Function  | ESP32‑S3 Pin | UART     |
 | --------- | ------------ | -------- |
-| Broker RX | GPIO 18      | UART2 RX |
-| Broker TX | GPIO 17      | UART2 TX |
+| GV2 RX    | GPIO 18      | UART2 RX |
+| GV2 TX    | GPIO 17      | UART2 TX |
 | Baudrate  | –            | 921600   |
 
 ### Modem & PMU Wiring
@@ -67,7 +67,7 @@ The system is optimized for **robust, streaming operation** with explicit state 
 
 ## Data Protocol (UART)
 
-The external device sends data in **framed ASCII lines**:
+The GV2 stick-on module sends data in **framed ASCII lines**:
 
 ### 1. JSON metadata
 

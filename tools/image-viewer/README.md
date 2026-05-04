@@ -2,6 +2,8 @@
 
 Random desktop image viewer for quick visual checks of datasets and field captures.
 
+By default it scans `tools/image-viewer/images`.
+
 ```powershell
 pip install -r requirements.txt
 .\run.ps1

@@ -9,10 +9,10 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$gv2Root = Join-Path $repoRoot 'gv2_firmware'
+$repoRoot = $PSScriptRoot
+$gv2Root = Join-Path $repoRoot 'external\gv2-firmware'
 $appRoot = Join-Path $gv2Root 'EPII_CM55M_APP_S'
-$buildScript = Join-Path $appRoot 'build.ps1'
+$makefile = Join-Path $appRoot 'makefile'
 $elf = Join-Path $appRoot 'obj_epii_evb_icv30_bdv10\gnu_epii_evb_WLCSP65\EPII_CM55M_gnu_epii_evb_WLCSP65_s.elf'
 $imageGenRoot = Join-Path $gv2Root 'we2_image_gen_local'
 $imageGenExe = Join-Path $imageGenRoot 'we2_local_image_gen.exe'
@@ -21,8 +21,12 @@ $imageInputElf = Join-Path $imageGenRoot 'input_case1_secboot\EPII_CM55M_gnu_epi
 $outputImage = Join-Path $imageGenRoot 'output_case1_sec_wlcsp\output.img'
 $previousImage = Join-Path (Split-Path -Parent $outputImage) $PreviousImageName
 
-if (-not (Test-Path -LiteralPath $buildScript)) {
-    throw "Missing build script: $buildScript"
+if (-not (Test-Path -LiteralPath $makefile)) {
+    throw "Missing GV2 makefile: $makefile"
+}
+
+if (-not (Get-Command make -ErrorAction SilentlyContinue)) {
+    throw "make was not found in PATH."
 }
 
 if (-not (Test-Path -LiteralPath $imageGenExe)) {
@@ -34,9 +38,16 @@ if (-not (Test-Path -LiteralPath $imageGenProject)) {
 }
 
 Write-Host 'Building GV2 ELF...' -ForegroundColor Cyan
-& powershell -ExecutionPolicy Bypass -File $buildScript -ExtraMakeArgs $ExtraMakeArgs -Target $Target
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+Push-Location $appRoot
+try {
+    $makeArgs = @($Target) + ($ExtraMakeArgs -split '\s+' | Where-Object { $_ })
+    & make @makeArgs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
 }
 
 if (-not (Test-Path -LiteralPath $elf)) {

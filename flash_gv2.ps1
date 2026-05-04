@@ -10,8 +10,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$gv2Dir = Join-Path $repoRoot 'gv2_firmware'
+$repoRoot = $PSScriptRoot
+$gv2Dir = Join-Path $repoRoot 'external\gv2-firmware'
 $sender = Join-Path $gv2Dir 'xmodem\xmodem_send.py'
 $imagePath = Join-Path $gv2Dir $ImageFile
 $modelPath = Join-Path $gv2Dir (($Model -split '\s+', 2)[0])

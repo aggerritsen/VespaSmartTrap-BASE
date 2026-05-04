@@ -1,3 +1,7 @@
+[submodule "external/gv2-firmware"]
+	path = external/gv2-firmware
+	url = https://github.com/marcory-hub/Seeed_Grove_Vision_AI_Module_V2.git
+	branch = yolo11-vespa
 [submodule "external/t-sim-motor-shield"]
 	path = external/t-sim-motor-shield
 	url = https://github.com/aggerritsen/T-SIMMotorShield.git

@@ -25,6 +25,8 @@ from PIL import Image, ImageTk
 
 
 SUPPORTED_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_BASE = SCRIPT_DIR / "images"
 
 
 def collect_images(folder: Path) -> list[Path]:
@@ -177,7 +179,12 @@ class RandomImageViewer:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", type=str, default="../images", help="Base folder containing the 3 subfolders")
+    ap.add_argument(
+        "--base",
+        type=str,
+        default=str(DEFAULT_BASE),
+        help="Base folder containing the image class subfolders",
+    )
     ap.add_argument("--seconds", type=float, default=5.0, help="Seconds per image")
     ap.add_argument(
         "--folders",
