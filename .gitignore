@@ -7,6 +7,10 @@ __pycache__/
 # PlatformIO / firmware build output
 firmware/.pio/
 firmware/.vscode/
+firmware/.vscode/.browse.c_cpp.db*
+firmware/.vscode/c_cpp_properties.json
+firmware/.vscode/launch.json
+firmware/.vscode/ipch/
 
 # Local serial/log/runtime output
 *.log
