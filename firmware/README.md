@@ -2,7 +2,7 @@
 
 This PlatformIO project contains the owned receiver firmware for the VST-BASE T-SIM7080G-S3 base unit.
 
-The firmware receives framed inference metadata and JPEG images from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes a POST log, validates incoming image frames, saves valid JPEGs, and acknowledges completed frames.
+The firmware receives binary inference state and JPEG frames from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes a POST log, streams valid JPEG frames to SD, and leaves actuator action deferred until the rest of the flow is ready.
 
 ## Hardware Role
 
@@ -16,6 +16,7 @@ T-SIM7080G-S3 base firmware
         +-- SIM7080 modem time
         +-- SIM7080 GNSS probe
         +-- SD-MMC image and POST logging
+        +-- TB6612FNG stepper actuator output
         +-- USB serial POST/heartbeat monitor
 ```
 
@@ -31,8 +32,8 @@ For more board details, see the [LilyGO T-SIM7080G repository](https://github.co
 | --- | --- | --- |
 | USB serial monitor | COM5, 115200 baud | POST and heartbeat output |
 | PlatformIO monitor | COM3, 115200 baud | Configured in `platformio.ini` |
-| GV2 UART RX | GPIO 18, UART2 RX | Receives data from stick-on module |
-| GV2 UART TX | GPIO 17, UART2 TX | Sends ACK lines back |
+| GV2 UART RX | GPIO 16 default, Serial2 RX | Configurable via `/config.json` |
+| GV2 UART TX | GPIO 17 default, Serial2 TX | Configurable via `/config.json` |
 | GV2 UART baud | 921600 | 4096-byte RX/TX buffers |
 | Modem RX | GPIO 4, Serial1 RX | SIM7080 AT interface |
 | Modem TX | GPIO 5, Serial1 TX | SIM7080 AT interface |
@@ -42,6 +43,13 @@ For more board details, see the [LilyGO T-SIM7080G repository](https://github.co
 | SD CMD | GPIO 39 | SD-MMC 1-bit mode |
 | SD CLK | GPIO 38 | SD-MMC 1-bit mode |
 | SD DATA | GPIO 40 | SD-MMC 1-bit mode |
+| Right LED / actuator active | GPIO 3 / D0 | HIGH while the configured stepper actuator cycle is in progress, including POST test |
+| Stepper PWMA | GPIO 9 | TB6612FNG channel A PWM |
+| Stepper AIN2 | GPIO 10 | TB6612FNG channel A input |
+| Stepper AIN1 | GPIO 11 | TB6612FNG channel A input |
+| Stepper BIN2 | GPIO 12 | TB6612FNG channel B input |
+| Stepper BIN1 | GPIO 13 | TB6612FNG channel B input |
+| Stepper PWMB | GPIO 14 | TB6612FNG channel B PWM |
 
 ## Boot Flow
 
@@ -55,62 +63,100 @@ On startup, `setup()` performs:
 6. Powers GNSS with `AT+CGNSPWR=1` and samples `AT+CGNSINF` for up to 10 seconds.
 7. Initializes UART2 for the GV2 link.
 8. Initializes SD-MMC with custom T-SIM7080G-S3 pins.
-9. Writes `/post.log` to the SD card when the card is available.
-10. Prints a POST summary and enters receive mode.
+9. Ensures `/config.json` exists and loads stepper settings.
+10. Initializes the TB6612FNG stepper output.
+11. Writes `/post.log` to the SD card when the card is available.
+12. Prints a POST summary.
+13. Runs one stepper POST test cycle: configured rotation forward, waits 1 second, configured rotation reverse.
+14. Enters receive mode.
 
-Every 5 seconds the loop prints a heartbeat with frame state, byte/line counters, heap, modem, time, GNSS, UART, and SD status.
+Every 5 seconds the loop prints a diagnostic heartbeat with heap, modem, time, GNSS, UART, SD, and receive counters. GV2 receive output is event-driven: the important line is printed when a JPEG frame has fully arrived and has been saved.
 
 ## UART Protocol
 
-The receiver expects newline-delimited ASCII control lines and a fixed-length Base64 image payload.
+The receiver expects binary frames from the current GV2 firmware.
 
 ```text
-JSON {"frame":123,"label":"hornet","score":0.94}
-IMAGE <base64_length> <crc32_hex>
-<base64 JPEG payload, exactly base64_length bytes>
-END
+State frame:
+VSTS + state_u8
+
+JPEG frame:
+VSTJ + state_u8 + class_idx_u8 + conf_u8 + bbox_x_u16_le + bbox_y_u16_le + bbox_w_u16_le + bbox_h_u16_le + jpeg_len_u32_le + crc32_u32_le + jpeg_bytes
 ```
 
-The receiver replies only after a valid frame reaches `END`:
-
-```text
-ACK <frame_id>
-```
-
-The `frame_id` is extracted with a simple search for the `"frame":` field in the JSON text. The JSON is currently stored and printed as text; it is not parsed with ArduinoJson.
+The JPEG header contains the best detection box from the GV2 inference result. The length is the trimmed JPEG payload length through the real `FFD9` marker. CRC32 is computed over exactly those JPEG bytes. The receiver prints completion output only after all `jpeg_len_u32_le` payload bytes are received, the CRC matches, and the configured inference filter has been evaluated.
 
 ## Receive State Machine
 
 | State | Responsibility |
 | --- | --- |
-| `WAIT_JSON` | Wait for a line beginning with `JSON ` |
-| `WAIT_IMAGE_HEADER` | Read `IMAGE <length> <crc>` |
-| `READ_IMAGE` | Accumulate exactly the declared Base64 payload length |
-| `WAIT_END` | Wait for `END`, validate, save, ACK, then reset |
+| Magic scan | Wait for `VSTS` or `VSTJ` |
+| State frame | Read one state byte and update diagnostics |
+| JPEG header | Read state, class, confidence, bounding box, payload length, and CRC32 |
+| JPEG payload | Read exactly the declared JPEG bytes into RAM, validate CRC32, save, and append `/frames.log` |
 
-A new `JSON ` line globally resynchronizes the receiver and starts a fresh frame.
+The parser continuously scans for magic bytes when idle, so it can resynchronize after noise or a discarded invalid frame.
 
 ## Validation
 
 Before saving an image, the firmware checks:
 
-- CRC32 over the Base64 payload using `esp_crc32_le`.
-- Base64 decode using mbedTLS.
-- JPEG markers: SOI `FFD8`, SOS `FFDA`, and EOI `FFD9`.
+- The binary frame has a valid non-zero JPEG length.
+- The declared length does not exceed the receiver maximum.
+- CRC32 over the received JPEG bytes matches the sender header.
+- Inference confidence is equal to or greater than `inference.confidence_threshold`.
+- Inference class equals `inference.detected_class`, unless the configured class is `-1`.
+- The class/confidence filter has matched for `inference.occurrence` consecutive valid frames.
 - SD card availability.
 
-Invalid frames are discarded and do not receive an ACK.
+Invalid frames and non-matching detections are logged but not saved. Once the configured consecutive occurrence count is reached, the receiver runs the configured stepper actuator cycle first, then saves the JPEG.
 
 ## SD Card Output
 
 The firmware writes:
 
 ```text
+/config.json
 /post.log
-/frame_000123.jpg
+/frames.log
+/20260504_163530_000123.jpg
 ```
 
-`/post.log` is overwritten at boot. JPEG filenames use the frame number from the JSON metadata.
+`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `src/version.h`. `/frames.log` is appended as JSON Lines. JPEG filenames use the known system timestamp plus a local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
+
+Each `/frames.log` line records timestamp, GNSS coordinates, inference state/class/confidence, configured inference filter, detection match result, bounding box, JPEG length, CRC, saved filename, current actuator settings, device name, CPU make/model, and software version.
+
+The stepper settings currently used are:
+
+```json
+{
+  "stepper": {
+    "speed_steps_per_second": 200,
+    "rotation_degrees": 90,
+    "steps_per_revolution": 2048,
+    "reverse_wait_ms": 1000
+  },
+  "inference": {
+    "confidence_threshold": 0.0,
+    "detected_class": -1,
+    "occurrence": 1
+  }
+}
+```
+
+UART pins can also be changed without rebuilding:
+
+```json
+{
+  "uart": {
+    "rx_gpio": 16,
+    "tx_gpio": 17,
+    "baud": 921600
+  }
+}
+```
+
+The default `steps_per_revolution` is `2048` for a 28BYJ-48 in full-step mode. The POST test cycle runs the configured rotation forward, waits `reverse_wait_ms`, then reverses by the same amount. `inference.confidence_threshold` is a `0.0` to `1.0` threshold, `inference.detected_class` is the target class index, and `inference.occurrence` is the number of consecutive matching detections required before actuation and saving. Use `-1` for `detected_class` to accept any class.
 
 ## Build And Flash
 
@@ -129,11 +175,16 @@ cd firmware
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.cpp` | POST reporting, UART2 setup, receive state machine, CRC/Base64/JPEG validation, ACKs, heartbeat |
+| `src/main.cpp` | POST reporting, setup orchestration, heartbeat |
 | `src/modem.cpp` | AXP2101 rails, SIM7080 AT readiness, network time, GNSS probe |
 | `src/modem.h` | Modem API and GNSS data structure |
-| `src/sdcard.cpp` | SD-MMC custom pin setup, `/post.log`, JPEG writing |
+| `src/sdcard.cpp` | SD-MMC custom pin setup, `/config.json`, `/post.log`, JPEG writing |
 | `src/sdcard.h` | SD card API |
+| `src/stepper.cpp` | TB6612FNG full-step actuator drive using config speed/rotation |
+| `src/stepper.h` | Stepper API |
+| `src/uart.cpp` | GV2 Serial2 binary `VSTS`/`VSTJ` receiver and JPEG streaming |
+| `src/uart.h` | GV2 UART API and receive statistics |
+| `src/version.h` | Software name and version used in POST and frame logs |
 | `platformio.ini` | ESP32-S3 build, serial ports, PSRAM, 16 MB flash, dependencies |
 | `huge_app.csv` | Partition table |
 
@@ -143,7 +194,5 @@ cd firmware
 - TinyGSM for SIM7080 AT support
 - XPowersLib for AXP2101 PMU control
 - SD_MMC from the ESP32 Arduino core
-- mbedTLS Base64
-- ESP-IDF UART and CRC helpers through the Arduino build
-
-`ArduinoJson` is listed in `platformio.ini` but is not currently used by `src/`.
+- ArduinoJson for `/config.json`
+- ESP-IDF helpers through the Arduino build

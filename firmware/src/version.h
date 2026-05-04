@@ -1,0 +1,4 @@
+#pragma once
+
+#define VST_BASE_SOFTWARE_VERSION "0.2.0"
+#define VST_BASE_SOFTWARE_NAME "VST-BASE T-SIM7080G-S3 receiver"

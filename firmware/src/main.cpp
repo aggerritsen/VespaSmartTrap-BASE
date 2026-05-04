@@ -2,47 +2,15 @@
 #include <sys/time.h>
 #include <time.h>
 
-#include "driver/uart.h"
-#include "esp_crc.h"
 #include "esp_system.h"
-#include "mbedtls/base64.h"
 
 #include "sdcard.h"
 #include "modem.h"
-
-/* =========================================================
-   BROKER UART CONFIG
-   ========================================================= */
-static constexpr uart_port_t BROKER_UART = UART_NUM_2;
-static constexpr int BROKER_RX_PIN = 18;    // P1.4
-static constexpr int BROKER_TX_PIN = 17;    // P1.3
-static constexpr int BROKER_BAUD   = 921600;
-static constexpr int BROKER_BUF_SZ = 4096;
-
-/* =========================================================
-   RX STATE MACHINE
-   ========================================================= */
-enum RxState {
-    WAIT_JSON,
-    WAIT_IMAGE_HEADER,
-    READ_IMAGE,
-    WAIT_END
-};
-
-static RxState rx_state = WAIT_JSON;
-
-/* =========================================================
-   FRAME DATA
-   ========================================================= */
-static String   json_buffer;
-static String   image_base64;
-static size_t   image_expected_len = 0;
-static uint32_t image_expected_crc = 0;
-static uint32_t frame_id = 0;
+#include "stepper.h"
+#include "uart.h"
+#include "version.h"
 
 static char g_timestamp[32] = {0};
-static uint32_t g_rx_bytes = 0;
-static uint32_t g_rx_lines = 0;
 
 struct PostResult {
     bool modem_ready = false;
@@ -50,12 +18,14 @@ struct PostResult {
     bool system_time = false;
     bool gnss_ready = false;
     bool gnss_fix = false;
-    bool broker_uart = false;
+    bool gv2_uart = false;
     bool sd_card = false;
+    bool sd_config = false;
 };
 
 static PostResult g_post;
 static ModemGnssInfo g_gnss;
+static BaseConfig g_config;
 
 /* =========================================================
    UTIL
@@ -124,6 +94,15 @@ static String make_post_summary_text()
     s += "POST SUMMARY\n";
     s += "==================================================\n";
     s += "firmware=receiver build=2026-05-04 post-log-v2\n";
+    s += "software_name=";
+    s += VST_BASE_SOFTWARE_NAME;
+    s += "\n";
+    s += "software_version=";
+    s += VST_BASE_SOFTWARE_VERSION;
+    s += "\n";
+    s += "device_name=";
+    s += g_config.device_name;
+    s += "\n";
     s += "log_policy=overwrite_at_boot\n";
     s += "modem_timestamp_compact=";
     s += g_post.modem_time ? g_timestamp : "unavailable";
@@ -175,16 +154,14 @@ static String make_post_summary_text()
     s += mac;
     s += "\n";
     s += "usb_serial=COM5 baud=115200\n";
-    s += "broker_uart=UART";
-    s += (int)BROKER_UART;
+    s += "gv2_uart=Serial2";
     s += " RX=";
-    s += BROKER_RX_PIN;
+    s += g_config.uart.rx_gpio;
     s += " TX=";
-    s += BROKER_TX_PIN;
+    s += g_config.uart.tx_gpio;
     s += " baud=";
-    s += BROKER_BAUD;
-    s += " buffer=";
-    s += BROKER_BUF_SZ;
+    s += g_config.uart.baud;
+    s += " protocol=VSTJ/VSTS+CRC32";
     s += "\n";
     s += "modem_at=";
     s += g_post.modem_ready ? "PASS" : "FAIL";
@@ -226,11 +203,35 @@ static String make_post_summary_text()
     s += "gnss_raw=";
     s += g_gnss.raw[0] ? g_gnss.raw : "unavailable";
     s += "\n";
-    s += "broker_uart_status=";
-    s += g_post.broker_uart ? "PASS" : "FAIL";
+    s += "gv2_uart_status=";
+    s += g_post.gv2_uart ? "PASS" : "FAIL";
     s += "\n";
     s += "sd_card=";
     s += g_post.sd_card ? "PASS" : "FAIL";
+    s += "\n";
+    s += "sd_config=";
+    s += g_post.sd_config ? "PASS /config.json" : "FAIL";
+    s += "\n";
+    s += "stepper_speed_steps_per_second=";
+    s += g_config.stepper.speed_steps_per_second;
+    s += "\n";
+    s += "stepper_rotation_degrees=";
+    s += g_config.stepper.rotation_degrees;
+    s += "\n";
+    s += "stepper_reverse_wait_ms=";
+    s += g_config.stepper.reverse_wait_ms;
+    s += "\n";
+    s += "stepper_steps_per_revolution=";
+    s += g_config.stepper.steps_per_revolution;
+    s += "\n";
+    s += "inference_confidence_threshold=";
+    s += String(g_config.inference.confidence_threshold, 3);
+    s += "\n";
+    s += "inference_detected_class=";
+    s += g_config.inference.detected_class;
+    s += "\n";
+    s += "inference_occurrence=";
+    s += g_config.inference.occurrence;
     s += "\n";
     s += "==================================================\n\n";
 
@@ -243,7 +244,7 @@ static void print_system_info()
     Serial.println("==================================================");
     Serial.println(" POWER-ON SELF TEST: T-SIM7080G-S3 RECEIVER");
     Serial.println("==================================================");
-    Serial.println("POST: firmware=receiver build=2026-05-04 debug-com5");
+    Serial.printf("POST: firmware=receiver version=%s build=2026-05-04 debug-com5\n", VST_BASE_SOFTWARE_VERSION);
     Serial.printf("POST: reset_reason=%s (%d)\n",
                   reset_reason_name(esp_reset_reason()),
                   (int)esp_reset_reason());
@@ -267,12 +268,6 @@ static void print_system_info()
                   ESP.getFreePsram());
     Serial.printf("POST: efuse_mac=%012llX\n", ESP.getEfuseMac());
     Serial.printf("POST: usb_serial=COM5 baud=115200\n");
-    Serial.printf("POST: broker_uart=UART%d RX=%d TX=%d baud=%d buffer=%d\n",
-                  (int)BROKER_UART,
-                  BROKER_RX_PIN,
-                  BROKER_TX_PIN,
-                  BROKER_BAUD,
-                  BROKER_BUF_SZ);
     Serial.flush();
 }
 
@@ -281,6 +276,13 @@ static void print_post_summary()
     Serial.println("==================================================");
     Serial.println(" POST SUMMARY");
     Serial.println("==================================================");
+    Serial.printf("POST: software_version  [%s]\n", VST_BASE_SOFTWARE_VERSION);
+    Serial.printf("POST: device_name       [%s]\n", g_config.device_name);
+    Serial.printf("POST: stepper_wait_ms   [%u]\n", g_config.stepper.reverse_wait_ms);
+    Serial.printf("POST: inference_filter  [class=%d confidence>=%.3f occurrence=%u]\n",
+                  g_config.inference.detected_class,
+                  g_config.inference.confidence_threshold,
+                  g_config.inference.occurrence);
     print_post_line("modem_at", g_post.modem_ready);
     print_post_line("modem_timestamp", g_post.modem_time, g_post.modem_time ? g_timestamp : "no valid network time");
     print_post_line("system_time", g_post.system_time);
@@ -297,10 +299,11 @@ static void print_post_summary()
                       g_gnss.longitude[0] ? g_gnss.longitude : "-",
                       g_gnss.satellites[0] ? g_gnss.satellites : "-");
     }
-    print_post_line("broker_uart", g_post.broker_uart);
+    print_post_line("gv2_uart", g_post.gv2_uart);
     print_post_line("sd_card", g_post.sd_card);
+    print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
     Serial.printf("POST: startup_heap_free=%u\n", ESP.getFreeHeap());
-    Serial.println("POST: receiver idle; waiting for broker UART traffic");
+    Serial.println("POST: receiver idle; waiting for GV2 UART traffic");
     Serial.println("==================================================");
     Serial.flush();
 }
@@ -313,15 +316,6 @@ static void write_post_summary_to_sd()
     String summary = make_post_summary_text();
     bool ok = sdcard_write_log("/post.log", summary);
     print_post_line("sd_post_log", ok, ok ? "/post.log" : "write failed");
-}
-
-static void reset_frame()
-{
-    json_buffer = "";
-    image_base64 = "";
-    image_expected_len = 0;
-    image_expected_crc = 0;
-    rx_state = WAIT_JSON;
 }
 
 static bool is_digit(char c)
@@ -391,112 +385,6 @@ static bool set_system_time_from_timestamp(const char *ts)
     return true;
 }
 
-/* =========================================================
-   JPEG SANITY CHECK
-   ========================================================= */
-static bool jpeg_sanity_check(const uint8_t *buf, size_t len)
-{
-    if (len < 4 || buf[0] != 0xFF || buf[1] != 0xD8)
-        return false;
-
-    bool found_sos = false;
-    bool found_eoi = false;
-
-    for (size_t i = 2; i + 1 < len; i++) {
-        if (buf[i] != 0xFF) continue;
-        uint8_t marker = buf[i + 1];
-        if (marker == 0x00) continue;
-        if (marker == 0xDA) found_sos = true;
-        if (marker == 0xD9) { found_eoi = true; break; }
-    }
-
-    return found_sos && found_eoi;
-}
-
-/* =========================================================
-   BASE64 → JPEG
-   ========================================================= */
-static bool decode_base64_to_jpeg(
-    const String &b64,
-    uint8_t **out_buf,
-    size_t *out_len
-)
-{
-    size_t decoded_len = 0;
-
-    int rc = mbedtls_base64_decode(
-        nullptr, 0, &decoded_len,
-        (const unsigned char*)b64.c_str(),
-        b64.length()
-    );
-
-    if (rc != MBEDTLS_ERR_BASE64_BUFFER_TOO_SMALL)
-        return false;
-
-    uint8_t *buf = (uint8_t*)heap_caps_malloc(decoded_len, MALLOC_CAP_8BIT);
-    if (!buf) return false;
-
-    rc = mbedtls_base64_decode(
-        buf, decoded_len, out_len,
-        (const unsigned char*)b64.c_str(),
-        b64.length()
-    );
-
-    if (rc != 0) {
-        free(buf);
-        return false;
-    }
-
-    *out_buf = buf;
-    return true;
-}
-
-/* =========================================================
-   BROKER UART INIT
-   ========================================================= */
-static bool broker_uart_init()
-{
-    Serial.println("POST: broker UART init begin");
-
-    uart_config_t cfg {
-        .baud_rate = BROKER_BAUD,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_APB
-    };
-
-    esp_err_t err = uart_driver_install(BROKER_UART, BROKER_BUF_SZ, BROKER_BUF_SZ, 0, nullptr, 0);
-    if (err != ESP_OK) {
-        Serial.printf("POST: broker UART driver install FAILED err=%d\n", (int)err);
-        Serial.flush();
-        return false;
-    }
-
-    err = uart_param_config(BROKER_UART, &cfg);
-    if (err != ESP_OK) {
-        Serial.printf("POST: broker UART param config FAILED err=%d\n", (int)err);
-        Serial.flush();
-        return false;
-    }
-
-    err = uart_set_pin(BROKER_UART, BROKER_TX_PIN, BROKER_RX_PIN,
-                       UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-    if (err != ESP_OK) {
-        Serial.printf("POST: broker UART pin config FAILED err=%d\n", (int)err);
-        Serial.flush();
-        return false;
-    }
-
-    Serial.printf(
-        "POST: broker UART configured RX=%d TX=%d baud=%d buffer=%d\n",
-        BROKER_RX_PIN, BROKER_TX_PIN, BROKER_BAUD, BROKER_BUF_SZ
-    );
-    Serial.flush();
-    return true;
-}
-
 static void print_idle_heartbeat()
 {
     static bool serial_post_copy_printed = false;
@@ -516,18 +404,18 @@ static void print_idle_heartbeat()
         print_post_summary();
     }
 
-    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu state=%d frame=%lu rx_bytes=%lu rx_lines=%lu heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s\n",
+    const Gv2UartStats &uart_stats = gv2_uart_stats();
+    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s\n",
                   (unsigned long)now,
-                  (int)rx_state,
-                  (unsigned long)frame_id,
-                  (unsigned long)g_rx_bytes,
-                  (unsigned long)g_rx_lines,
+                  (unsigned long)uart_stats.bytes,
+                  (unsigned long)uart_stats.jpeg_frames,
+                  (unsigned long)uart_stats.state_frames,
                   ESP.getFreeHeap(),
                   g_post.modem_ready ? "OK" : "NO",
                   g_post.modem_time ? g_timestamp : "NO",
                   g_post.gnss_ready ? "OK" : "NO",
                   g_post.gnss_fix ? "YES" : "NO",
-                  g_post.broker_uart ? "OK" : "NO",
+                  g_post.gv2_uart ? "OK" : "NO",
                   sdcard_available() ? "OK" : "NO");
     Serial.flush();
 }
@@ -570,15 +458,23 @@ void setup()
     }
     Serial.flush();
 
-    g_post.broker_uart = broker_uart_init();
-    print_post_line("broker_uart", g_post.broker_uart);
-
     Serial.println("POST: SD card init begin");
     g_post.sd_card = sdcard_init();
     print_post_line("sd_card", g_post.sd_card);
+    g_post.sd_config = sdcard_ensure_config();
+    print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
+    bool config_loaded = sdcard_load_config(g_config);
+    print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
+
+    g_post.gv2_uart = gv2_uart_init(g_config.uart);
+    gv2_uart_set_log_context(&g_config, &g_gnss);
+    print_post_line("gv2_uart", g_post.gv2_uart);
+
+    stepper_init(g_config.stepper);
     write_post_summary_to_sd();
 
     print_post_summary();
+    stepper_run_post_test_cycle();
 }
 
 /* =========================================================
@@ -586,81 +482,6 @@ void setup()
    ========================================================= */
 void loop()
 {
+    gv2_uart_poll();
     print_idle_heartbeat();
-
-    uint8_t c;
-    if (uart_read_bytes(BROKER_UART, &c, 1, 20 / portTICK_PERIOD_MS) <= 0)
-        return;
-    g_rx_bytes++;
-
-    static String line;
-
-    if (rx_state == READ_IMAGE) {
-        image_base64 += (char)c;
-        if (image_base64.length() >= image_expected_len)
-            rx_state = WAIT_END;
-        return;
-    }
-
-    if (c != '\n') {
-        line += (char)c;
-        return;
-    }
-
-    line.trim();
-    g_rx_lines++;
-
-    /* ---------- GLOBAL RESYNC ON JSON ---------- */
-    if (line.startsWith("JSON ")) {
-        reset_frame();
-
-        json_buffer = line.substring(5);
-        int idx = json_buffer.indexOf("\"frame\":");
-        if (idx >= 0)
-            frame_id = json_buffer.substring(idx + 8).toInt();
-
-        Serial.println("🧠 INFERENCE");
-        Serial.printf("Frame      : %lu\n", frame_id);
-        Serial.println(json_buffer);
-
-        rx_state = WAIT_IMAGE_HEADER;
-        line = "";
-        return;
-    }
-
-    if (rx_state == WAIT_IMAGE_HEADER && line.startsWith("IMAGE ")) {
-        sscanf(line.c_str(), "IMAGE %zu %lx",
-               &image_expected_len, &image_expected_crc);
-
-        image_base64.reserve(image_expected_len);
-        rx_state = READ_IMAGE;
-    }
-    else if (rx_state == WAIT_END && line == "END") {
-        uint32_t crc = esp_crc32_le(
-            0,
-            (const uint8_t*)image_base64.c_str(),
-            image_base64.length()
-        );
-
-        if (crc == image_expected_crc) {
-            uint8_t *jpeg = nullptr;
-            size_t jpeg_len = 0;
-
-            if (decode_base64_to_jpeg(image_base64, &jpeg, &jpeg_len) &&
-                jpeg_sanity_check(jpeg, jpeg_len) &&
-                sdcard_available())
-            {
-                sdcard_save_jpeg(frame_id, jpeg, jpeg_len);
-            }
-
-            free(jpeg);
-
-            String ack = "ACK " + String(frame_id) + "\n";
-            uart_write_bytes(BROKER_UART, ack.c_str(), ack.length());
-        }
-
-        reset_frame();
-    }
-
-    line = "";
 }
