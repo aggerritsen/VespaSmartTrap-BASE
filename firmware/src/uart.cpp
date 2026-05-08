@@ -440,6 +440,9 @@ static void append_frame_log(bool saved, bool valid, bool filter_match, bool det
     s += (unsigned)stepper.speed_steps_per_second;
     s += ",\"wait_ms\":";
     s += (unsigned)stepper.reverse_wait_ms;
+    s += ",\"start_direction\":\"";
+    s += stepper.start_direction;
+    s += "\"";
     s += ",\"eligible\":";
     s += detection_match ? "true" : "false";
     s += ",\"activated\":";

@@ -3,6 +3,7 @@
 #include "sdcard.h"
 #include <ArduinoJson.h>
 #include <SD_MMC.h>
+#include <strings.h>
 #include <time.h>
 
 /* =============================
@@ -39,7 +40,9 @@ static const char *DEFAULT_CONFIG =
     "    \"speed_steps_per_second\": 200,\n"
     "    \"rotation_degrees\": 90,\n"
     "    \"steps_per_revolution\": 2048,\n"
-    "    \"reverse_wait_ms\": 1000\n"
+    "    \"reverse_wait_ms\": 1000,\n"
+    "    \"start_direction\": \"clockwise\",\n"
+    "    \"_start_direction_comment\": \"Use clockwise/cw or anti-clockwise/ccw\"\n"
     "  },\n"
     "  \"inference\": {\n"
     "    \"confidence_threshold\": 0.0,\n"
@@ -51,6 +54,10 @@ static const char *DEFAULT_CONFIG =
     "    \"ssid\": \"VST-BASE\",\n"
     "    \"password\": \"\",\n"
     "    \"append_mac\": true\n"
+    "  },\n"
+    "  \"power\": {\n"
+    "    \"log_interval_seconds\": 60,\n"
+    "    \"_log_interval_comment\": \"Use 60 for now; later 900 for 15 minutes or 3600 for 1 hour\"\n"
     "  }\n"
     "}\n";
 
@@ -84,6 +91,28 @@ static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id)
     }
 
     snprintf(path, path_len, "/uptime_%010lu_%06lu.jpg", millis(), (unsigned long)frame_id);
+}
+
+static bool is_anti_clockwise_direction(const char *direction)
+{
+    if (!direction)
+        return false;
+
+    return strcasecmp(direction, "anti-clockwise") == 0 ||
+           strcasecmp(direction, "anticlockwise") == 0 ||
+           strcasecmp(direction, "counter-clockwise") == 0 ||
+           strcasecmp(direction, "counterclockwise") == 0 ||
+           strcasecmp(direction, "ccw") == 0 ||
+           strcasecmp(direction, "anti-clokckwise") == 0;
+}
+
+static bool is_clockwise_direction(const char *direction)
+{
+    if (!direction)
+        return false;
+
+    return strcasecmp(direction, "clockwise") == 0 ||
+           strcasecmp(direction, "cw") == 0;
 }
 
 /* =============================
@@ -219,6 +248,10 @@ bool sdcard_load_config(BaseConfig &config)
         stepper["steps_per_revolution"] | config.stepper.steps_per_revolution;
     config.stepper.reverse_wait_ms =
         stepper["reverse_wait_ms"] | config.stepper.reverse_wait_ms;
+    const char *start_direction = stepper["start_direction"] | config.stepper.start_direction;
+    strlcpy(config.stepper.start_direction,
+            is_anti_clockwise_direction(start_direction) && !is_clockwise_direction(start_direction) ? "anti-clockwise" : "clockwise",
+            sizeof(config.stepper.start_direction));
 
     if (config.stepper.speed_steps_per_second == 0)
         config.stepper.speed_steps_per_second = 200;
@@ -256,7 +289,15 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.web.mode > 2)
         config.web.mode = 0;
 
-    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s\n",
+    JsonObject power = doc["power"];
+    config.power.log_interval_seconds =
+        power["log_interval_seconds"] | config.power.log_interval_seconds;
+    if (config.power.log_interval_seconds == 0)
+        config.power.log_interval_seconds = 60;
+    if (config.power.log_interval_seconds > 86400)
+        config.power.log_interval_seconds = 86400;
+
+    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu\n",
                   config.device_name,
                   config.uart.rx_gpio,
                   config.uart.tx_gpio,
@@ -265,11 +306,13 @@ bool sdcard_load_config(BaseConfig &config)
                   config.stepper.rotation_degrees,
                   config.stepper.steps_per_revolution,
                   config.stepper.reverse_wait_ms,
+                  config.stepper.start_direction,
                   config.inference.confidence_threshold,
                   config.inference.detected_class,
                   config.inference.occurrence,
                   config.web.mode,
-                  config.web.ssid);
+                  config.web.ssid,
+                  (unsigned long)config.power.log_interval_seconds);
 
     return true;
 }

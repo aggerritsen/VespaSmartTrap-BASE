@@ -6,6 +6,7 @@ struct StepperConfig {
     uint16_t rotation_degrees = 90;
     uint16_t steps_per_revolution = 2048;
     uint16_t reverse_wait_ms = 1000;
+    char start_direction[17] = "clockwise";
 };
 
 struct UartConfig {
@@ -27,12 +28,17 @@ struct WebConfig {
     bool append_mac = true;
 };
 
+struct PowerConfig {
+    uint32_t log_interval_seconds = 60;
+};
+
 struct BaseConfig {
     char device_name[32] = "vst-base";
     UartConfig uart;
     StepperConfig stepper;
     InferenceConfig inference;
     WebConfig web;
+    PowerConfig power;
 };
 
 bool sdcard_init();

@@ -69,7 +69,7 @@ On startup, `setup()` performs:
 11. Starts the WiFi web service when enabled in config.
 12. Writes `/post.log` to the SD card when the card is available.
 13. Prints a POST summary.
-14. Runs one stepper POST test cycle: configured rotation forward, waits `reverse_wait_ms`, configured rotation reverse.
+14. Runs one stepper POST test cycle: configured `start_direction`, waits `reverse_wait_ms`, configured return rotation.
 15. Enters receive mode.
 
 Every 5 seconds the loop prints a diagnostic heartbeat with heap, modem, time, GNSS, UART, SD, and receive counters. GV2 receive output is event-driven: the important line is printed when a JPEG frame has fully arrived and has been validated, filtered, optionally actuated, and optionally saved.
@@ -136,7 +136,9 @@ The stepper settings currently used are:
     "speed_steps_per_second": 200,
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
-    "reverse_wait_ms": 1000
+    "reverse_wait_ms": 1000,
+    "start_direction": "clockwise",
+    "_start_direction_comment": "Use clockwise/cw or anti-clockwise/ccw"
   },
   "inference": {
     "confidence_threshold": 0.0,
@@ -171,9 +173,19 @@ The web service is enabled as an access point by default. `mode` is `0` off, `1`
 }
 ```
 
+Power telemetry is logged to `/power.log`. The interval is configured in seconds:
+
+```json
+{
+  "power": {
+    "log_interval_seconds": 60
+  }
+}
+```
+
 When enabled, open the IP printed as `WEB: ... ip=...` in the serial monitor. The page polls `/state.json` for inference metadata and fetches `/frame.jpg` only when a new verified frame id arrives, keeping the display path binary JPEG instead of base64. CRC-bad or structurally invalid JPEGs are logged but do not replace the last good web frame.
 
-The default `steps_per_revolution` is `2048` for a 28BYJ-48 in full-step mode. The POST test cycle runs the configured rotation forward, waits `reverse_wait_ms`, then reverses by the same amount. `inference.confidence_threshold` is a `0.0` to `1.0` threshold, `inference.detected_class` is the target class index, and `inference.occurrence` is the number of consecutive matching detections required before actuation and saving. Use `-1` for `detected_class` to accept any class.
+The default `steps_per_revolution` is `2048` for a 28BYJ-48 in full-step mode. `stepper.start_direction` accepts `clockwise`/`cw` or `anti-clockwise`/`ccw` and controls the first rotation of each POST or detection actuator cycle; the return rotation always runs in the opposite direction by the same amount. `inference.confidence_threshold` is a `0.0` to `1.0` threshold, `inference.detected_class` is the target class index, and `inference.occurrence` is the number of consecutive matching detections required before actuation and saving. Use `-1` for `detected_class` to accept any class.
 
 ## Build And Flash
 

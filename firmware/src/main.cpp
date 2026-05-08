@@ -6,6 +6,7 @@
 
 #include "sdcard.h"
 #include "modem.h"
+#include "power.h"
 #include "stepper.h"
 #include "uart.h"
 #include "version.h"
@@ -22,6 +23,7 @@ struct PostResult {
     bool gv2_uart = false;
     bool sd_card = false;
     bool sd_config = false;
+    bool power = false;
 };
 
 static PostResult g_post;
@@ -225,6 +227,9 @@ static String make_post_summary_text()
     s += "stepper_steps_per_revolution=";
     s += g_config.stepper.steps_per_revolution;
     s += "\n";
+    s += "stepper_start_direction=";
+    s += g_config.stepper.start_direction;
+    s += "\n";
     s += "inference_confidence_threshold=";
     s += String(g_config.inference.confidence_threshold, 3);
     s += "\n";
@@ -233,6 +238,9 @@ static String make_post_summary_text()
     s += "\n";
     s += "inference_occurrence=";
     s += g_config.inference.occurrence;
+    s += "\n";
+    s += "power_log_interval_seconds=";
+    s += g_config.power.log_interval_seconds;
     s += "\n";
     s += "==================================================\n\n";
 
@@ -280,6 +288,8 @@ static void print_post_summary()
     Serial.printf("POST: software_version  [%s]\n", VST_BASE_SOFTWARE_VERSION);
     Serial.printf("POST: device_name       [%s]\n", g_config.device_name);
     Serial.printf("POST: stepper_wait_ms   [%u]\n", g_config.stepper.reverse_wait_ms);
+    Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
+    Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
     Serial.printf("POST: inference_filter  [class=%d confidence>=%.3f occurrence=%u]\n",
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
@@ -303,6 +313,7 @@ static void print_post_summary()
     print_post_line("gv2_uart", g_post.gv2_uart);
     print_post_line("sd_card", g_post.sd_card);
     print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
+    print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
     Serial.printf("POST: startup_heap_free=%u\n", ESP.getFreeHeap());
     Serial.println("POST: receiver idle; waiting for GV2 UART traffic");
     Serial.println("==================================================");
@@ -386,14 +397,14 @@ static bool set_system_time_from_timestamp(const char *ts)
     return true;
 }
 
-static void print_idle_heartbeat()
+static bool print_idle_heartbeat()
 {
     static bool serial_post_copy_printed = false;
     static uint32_t last_ms = 0;
     uint32_t now = millis();
 
     if (now - last_ms < 5000)
-        return;
+        return false;
 
     last_ms = now;
 
@@ -419,6 +430,17 @@ static void print_idle_heartbeat()
                   g_post.gv2_uart ? "OK" : "NO",
                   sdcard_available() ? "OK" : "NO");
     Serial.flush();
+    return true;
+}
+
+static void print_power_after_heartbeat()
+{
+    PowerSnapshot snapshot;
+    if (!power_read_snapshot(snapshot))
+        return;
+
+    power_print_snapshot(snapshot);
+    power_log_snapshot_if_due(snapshot);
 }
 
 /* =========================================================
@@ -470,6 +492,9 @@ void setup()
     bool web_started = web_init(g_config.web);
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
 
+    g_post.power = power_init(g_config.power);
+    print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
+
     g_post.gv2_uart = gv2_uart_init(g_config.uart);
     gv2_uart_set_log_context(&g_config, &g_gnss);
     print_post_line("gv2_uart", g_post.gv2_uart);
@@ -488,5 +513,6 @@ void loop()
 {
     gv2_uart_poll();
     web_loop();
-    print_idle_heartbeat();
+    if (print_idle_heartbeat())
+        print_power_after_heartbeat();
 }

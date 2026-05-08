@@ -1,5 +1,7 @@
 #include "stepper.h"
 
+#include <string.h>
+
 /* TB6612FNG motor shield pin mapping imported from external/t-sim-motor-shield. */
 #ifndef D2_GPIO_CFG
   #define D2_GPIO_CFG 9
@@ -109,6 +111,11 @@ static inline void wait_until(uint32_t target_us)
     }
 }
 
+static bool start_direction_is_clockwise()
+{
+    return strcmp(g_stepper_config.start_direction, "anti-clockwise") != 0;
+}
+
 static void rotate_configured(bool forward, bool coast_after)
 {
     if (!g_stepper_ready)
@@ -176,11 +183,12 @@ void stepper_init(const StepperConfig &config)
     stepper_coast();
     g_stepper_ready = true;
 
-    Serial.printf("STEPPER: initialized speed=%u steps/s rotation=%u deg reverse_wait=%u ms steps_per_rev=%u right_led_gpio=%d pins PWMA=%d AIN2=%d AIN1=%d BIN2=%d BIN1=%d PWMB=%d\n",
+    Serial.printf("STEPPER: initialized speed=%u steps/s rotation=%u deg reverse_wait=%u ms steps_per_rev=%u start_direction=%s right_led_gpio=%d pins PWMA=%d AIN2=%d AIN1=%d BIN2=%d BIN1=%d PWMB=%d\n",
                   g_stepper_config.speed_steps_per_second,
                   g_stepper_config.rotation_degrees,
                   g_stepper_config.reverse_wait_ms,
                   g_stepper_config.steps_per_revolution,
+                  g_stepper_config.start_direction,
                   PIN_RIGHT_LED,
                   PIN_PWMA,
                   PIN_AIN2,
@@ -200,15 +208,17 @@ bool stepper_run_configured_cycle()
     if (!g_stepper_ready)
         return false;
 
-    Serial.println("STEPPER: actuator cycle forward");
+    bool start_clockwise = start_direction_is_clockwise();
+    Serial.printf("STEPPER: actuator cycle start_direction=%s\n",
+                  start_clockwise ? "clockwise" : "anti-clockwise");
     Serial.printf("STEPPER: right LED ON gpio=%d\n", PIN_RIGHT_LED);
     set_right_led(true);
-    rotate_configured(true, false);
+    rotate_configured(start_clockwise, false);
     uint32_t wait_ms = g_stepper_config.reverse_wait_ms == 0 ? 1000 : g_stepper_config.reverse_wait_ms;
-    Serial.printf("STEPPER: holding forward phase %lu ms before reverse\n", (unsigned long)wait_ms);
+    Serial.printf("STEPPER: holding start phase %lu ms before return\n", (unsigned long)wait_ms);
     delay(wait_ms);
-    Serial.println("STEPPER: actuator cycle reverse");
-    rotate_configured(false, true);
+    Serial.println("STEPPER: actuator cycle return");
+    rotate_configured(!start_clockwise, true);
     set_right_led(false);
     Serial.printf("STEPPER: right LED OFF gpio=%d\n", PIN_RIGHT_LED);
     Serial.println("STEPPER: actuator cycle done");

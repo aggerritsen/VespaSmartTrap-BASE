@@ -5,12 +5,18 @@
 #include <Wire.h>
 
 // XPowers
+#ifndef XPOWERS_CHIP_AXP2101
 #define XPOWERS_CHIP_AXP2101
+#endif
 #include <XPowersLib.h>
 
 // TinyGSM
+#ifndef TINY_GSM_MODEM_SIM7080
 #define TINY_GSM_MODEM_SIM7080
+#endif
+#ifndef TINY_GSM_RX_BUFFER
 #define TINY_GSM_RX_BUFFER 1024
+#endif
 #include <TinyGsmClient.h>
 
 // -------- Board wiring (T-SIM7080G-S3) --------
