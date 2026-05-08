@@ -86,7 +86,6 @@ tools/receiver/               Receiver helper scripts
 tools/Himax_AI_web_toolkit/   Local copy of the Himax web flashing toolkit
 build_gv2_image.ps1           GV2 firmware image build helper
 flash_gv2.ps1                 GV2 firmware and model flash helper
-sync_firmware_to_github.ps1   Project synchronization helper
 ```
 
 Submodules are intentionally kept under `external/` to make ownership and licensing boundaries clear.
