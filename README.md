@@ -1,5 +1,7 @@
 # VST-BASE
 
+![VST-BASE hardware](docs/Media.jpeg)
+
 VST-BASE is the base-unit firmware, hardware integration reference, model tooling, and validation workspace for the Vespa Smart Trap project. The base unit is built around a LilyGO T-SIM7080G-S3 and receives inference metadata and JPEG frames from a Grove Vision AI V2 stick-on module through a custom PCB.
 
 The root project is licensed under the GNU General Public License version 3.0. Keep source, build scripts, technical notes, and hardware references auditable and reproducible so that other developers can inspect, modify, rebuild, and redistribute the work under the repository's GNU license terms.
