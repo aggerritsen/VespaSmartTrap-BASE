@@ -9,12 +9,14 @@ bool modem_init_early();
 // Tries to obtain a *plausible* modem timestamp via AT+CCLK?
 // Output format: "YYYYMMDD_HHMMSS"
 // Returns true if a plausible network time was obtained, false if fallback was used.
-bool modem_get_timestamp(char *out, size_t out_len);
+bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms = 60000);
 
 struct ModemGnssInfo {
     bool command_ok = false;
     bool powered = false;
     bool fix = false;
+    bool position_valid = false;
+    uint8_t satellite_count = 0;
     char utc[24] = {0};
     char latitude[16] = {0};
     char longitude[16] = {0};

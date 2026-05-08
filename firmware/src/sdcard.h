@@ -32,6 +32,11 @@ struct PowerConfig {
     uint32_t log_interval_seconds = 60;
 };
 
+struct TimeConfig {
+    uint16_t network_timeout_seconds = 10;
+    bool allow_gnss_fallback = true;
+};
+
 struct BaseConfig {
     char device_name[32] = "vst-base";
     UartConfig uart;
@@ -39,6 +44,7 @@ struct BaseConfig {
     InferenceConfig inference;
     WebConfig web;
     PowerConfig power;
+    TimeConfig time;
 };
 
 bool sdcard_init();

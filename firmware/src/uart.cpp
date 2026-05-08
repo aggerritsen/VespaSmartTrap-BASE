@@ -29,7 +29,9 @@ static constexpr const char *FRAME_LOG_PATH = "/frames.log";
 
 static const uint8_t JPEG_MAGIC[4] = {'V', 'S', 'T', 'J'};
 static const uint8_t STATE_MAGIC[4] = {'V', 'S', 'T', 'S'};
+static const uint8_t ERROR_MAGIC[4] = {'V', 'S', 'T', 'E'};
 static constexpr int JPEG_HEADER_LEN = 1 + 1 + 1 + 2 + 2 + 2 + 2 + 4 + 4;
+static constexpr int ERROR_PAYLOAD_LEN = 1 + 1 + 4;
 
 struct JpegRxState {
     uint8_t magic_window[4] = {0, 0, 0, 0};
@@ -60,8 +62,15 @@ struct StateRxState {
     uint8_t magic_filled = 0;
 };
 
+struct ErrorRxState {
+    uint8_t magic_window[4] = {0, 0, 0, 0};
+    uint8_t magic_filled = 0;
+    bool waiting_error_payload = false;
+};
+
 static JpegRxState jpeg_rx;
 static StateRxState state_rx;
+static ErrorRxState error_rx;
 static Gv2UartStats stats;
 static const BaseConfig *log_config = nullptr;
 static const ModemGnssInfo *log_gnss = nullptr;
@@ -167,6 +176,9 @@ static void reset_uart_sync_windows()
     jpeg_rx.magic_filled = 0;
     memset(state_rx.magic_window, 0, sizeof(state_rx.magic_window));
     state_rx.magic_filled = 0;
+    memset(error_rx.magic_window, 0, sizeof(error_rx.magic_window));
+    error_rx.magic_filled = 0;
+    error_rx.waiting_error_payload = false;
     jpeg_rx.waiting_jpeg_header = false;
     jpeg_rx.legacy_prefix_len = 0;
 }
@@ -355,6 +367,70 @@ static uint16_t configured_occurrence()
     return occurrence == 0 ? 1 : occurrence;
 }
 
+static const char *gv2_error_name(uint8_t code, uint8_t detail)
+{
+    if (code == 3 && detail == 1)
+        return "camera_missing";
+    if (code == 3 && detail == 2)
+        return "camera_datapath_failed";
+    if (code == 3)
+        return "camera_error";
+    return "unknown";
+}
+
+static void append_gv2_error_log(uint8_t code, uint8_t detail, uint32_t counter)
+{
+    const BaseConfig *cfg = log_config;
+
+    String s;
+    s.reserve(280);
+    s += "{";
+    append_json_field(s, "timestamp", current_timestamp().c_str());
+    s += ",";
+    append_json_field(s, "device_name", cfg ? cfg->device_name : "vst-base");
+    s += ",";
+    append_json_field(s, "event", "gv2_error");
+    s += ",";
+    append_json_field(s, "name", gv2_error_name(code, detail));
+    s += ",\"code\":";
+    s += (unsigned)code;
+    s += ",\"detail\":";
+    s += (unsigned)detail;
+    s += ",\"counter\":";
+    s += (unsigned long)counter;
+    s += "}\n";
+
+    sdcard_append_log(FRAME_LOG_PATH, s);
+}
+
+static bool read_error_payload()
+{
+    if (Gv2Serial.available() < ERROR_PAYLOAD_LEN)
+        return false;
+
+    int code = Gv2Serial.read();
+    int detail = Gv2Serial.read();
+    uint32_t counter = 0;
+    if (code < 0 || detail < 0 || !read_u32_le(counter))
+        return false;
+
+    error_rx.waiting_error_payload = false;
+    stats.bytes += ERROR_PAYLOAD_LEN;
+    stats.error_frames++;
+    stats.last_error_code = (uint8_t)code;
+    stats.last_error_detail = (uint8_t)detail;
+    stats.last_error_counter = counter;
+    stats.last_state = (uint8_t)code;
+
+    Serial.printf("GV2: error code=%u detail=%u name=%s counter=%lu\n",
+                  (unsigned)stats.last_error_code,
+                  (unsigned)stats.last_error_detail,
+                  gv2_error_name(stats.last_error_code, stats.last_error_detail),
+                  (unsigned long)stats.last_error_counter);
+    append_gv2_error_log(stats.last_error_code, stats.last_error_detail, stats.last_error_counter);
+    return true;
+}
+
 static void append_frame_log(bool saved, bool valid, bool filter_match, bool detection_match, bool actuated, bool crc_ok, uint32_t crc_actual, size_t payload_len, const char *filename)
 {
     const BaseConfig *cfg = log_config;
@@ -540,7 +616,7 @@ bool gv2_uart_init(const UartConfig &config)
     size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
     Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
     Gv2Serial.setRxTimeout(1);
-    Serial.printf("POST: gv2_uart=Serial2 RX=%d TX=%d baud=%lu rx_buffer=%u protocol=VSTJ/VSTS+CRC32\n",
+    Serial.printf("POST: gv2_uart=Serial2 RX=%d TX=%d baud=%lu rx_buffer=%u protocol=VSTJ/VSTS/VSTE+CRC32\n",
                   active_config.rx_gpio,
                   active_config.tx_gpio,
                   (unsigned long)active_config.baud,
@@ -551,6 +627,12 @@ bool gv2_uart_init(const UartConfig &config)
 void gv2_uart_poll()
 {
     while (Gv2Serial.available() > 0) {
+        if (error_rx.waiting_error_payload) {
+            if (!read_error_payload())
+                break;
+            continue;
+        }
+
         if (jpeg_rx.waiting_jpeg_header) {
             if (!read_jpeg_header())
                 break;
@@ -699,6 +781,13 @@ void gv2_uart_poll()
                     stats.last_state = (uint8_t)state;
                 }
             }
+        }
+
+        shift_magic_window(error_rx.magic_window, &error_rx.magic_filled, value);
+        if (magic_matches(error_rx.magic_window, error_rx.magic_filled, ERROR_MAGIC)) {
+            error_rx.waiting_error_payload = true;
+            (void)read_error_payload();
+            continue;
         }
 
         shift_magic_window(jpeg_rx.magic_window, &jpeg_rx.magic_filled, value);

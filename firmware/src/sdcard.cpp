@@ -22,10 +22,8 @@ static const char *CONFIG_PATH = "/config.json";
 static const char *DEFAULT_CONFIG =
     "{\n"
     "  \"schema_version\": 1,\n"
-    "  \"device_name\": \"vst-base\",\n"
+    "  \"device_name\": \"vst-base-001\",\n"
     "  \"uart\": {\n"
-    "    \"rx_gpio\": 16,\n"
-    "    \"tx_gpio\": 17,\n"
     "    \"baud\": 921600\n"
     "  },\n"
     "  \"logging\": {\n"
@@ -36,28 +34,30 @@ static const char *DEFAULT_CONFIG =
     "    \"gnss_probe\": true,\n"
     "    \"ack_frames\": true\n"
     "  },\n"
+    "  \"time\": {\n"
+    "    \"network_timeout_seconds\": 10,\n"
+    "    \"allow_gnss_fallback\": true\n"
+    "  },\n"
     "  \"stepper\": {\n"
-    "    \"speed_steps_per_second\": 200,\n"
+    "    \"speed_steps_per_second\": 400,\n"
     "    \"rotation_degrees\": 90,\n"
     "    \"steps_per_revolution\": 2048,\n"
     "    \"reverse_wait_ms\": 1000,\n"
-    "    \"start_direction\": \"clockwise\",\n"
-    "    \"_start_direction_comment\": \"Use clockwise/cw or anti-clockwise/ccw\"\n"
+    "    \"start_direction\": \"ccw\"\n"
     "  },\n"
     "  \"inference\": {\n"
-    "    \"confidence_threshold\": 0.0,\n"
-    "    \"detected_class\": -1,\n"
-    "    \"occurrence\": 1\n"
+    "    \"confidence_threshold\": 0.89,\n"
+    "    \"detected_class\": 3,\n"
+    "    \"occurrence\": 3\n"
+    "  },\n"
+    "  \"power\": {\n"
+    "    \"log_interval_seconds\": 60\n"
     "  },\n"
     "  \"web\": {\n"
     "    \"mode\": 2,\n"
     "    \"ssid\": \"VST-BASE\",\n"
     "    \"password\": \"\",\n"
     "    \"append_mac\": true\n"
-    "  },\n"
-    "  \"power\": {\n"
-    "    \"log_interval_seconds\": 60,\n"
-    "    \"_log_interval_comment\": \"Use 60 for now; later 900 for 15 minutes or 3600 for 1 hour\"\n"
     "  }\n"
     "}\n";
 
@@ -279,6 +279,16 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.inference.occurrence == 0)
         config.inference.occurrence = 1;
 
+    JsonObject time = doc["time"];
+    config.time.network_timeout_seconds =
+        time["network_timeout_seconds"] | config.time.network_timeout_seconds;
+    config.time.allow_gnss_fallback =
+        time["allow_gnss_fallback"] | config.time.allow_gnss_fallback;
+    if (config.time.network_timeout_seconds == 0)
+        config.time.network_timeout_seconds = 1;
+    if (config.time.network_timeout_seconds > 300)
+        config.time.network_timeout_seconds = 300;
+
     JsonObject web = doc["web"];
     config.web.mode = web["mode"] | config.web.mode;
     const char *web_ssid = web["ssid"] | config.web.ssid;
@@ -297,7 +307,7 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.power.log_interval_seconds > 86400)
         config.power.log_interval_seconds = 86400;
 
-    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu\n",
+    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s\n",
                   config.device_name,
                   config.uart.rx_gpio,
                   config.uart.tx_gpio,
@@ -312,7 +322,9 @@ bool sdcard_load_config(BaseConfig &config)
                   config.inference.occurrence,
                   config.web.mode,
                   config.web.ssid,
-                  (unsigned long)config.power.log_interval_seconds);
+                  (unsigned long)config.power.log_interval_seconds,
+                  config.time.network_timeout_seconds,
+                  config.time.allow_gnss_fallback ? "YES" : "NO");
 
     return true;
 }

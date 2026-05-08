@@ -17,6 +17,7 @@ static char g_timestamp[32] = {0};
 struct PostResult {
     bool modem_ready = false;
     bool modem_time = false;
+    bool gnss_time = false;
     bool system_time = false;
     bool gnss_ready = false;
     bool gnss_fix = false;
@@ -107,8 +108,11 @@ static String make_post_summary_text()
     s += g_config.device_name;
     s += "\n";
     s += "log_policy=overwrite_at_boot\n";
-    s += "modem_timestamp_compact=";
-    s += g_post.modem_time ? g_timestamp : "unavailable";
+    s += "timestamp_compact=";
+    s += (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "unavailable";
+    s += "\n";
+    s += "timestamp_source=";
+    s += g_post.modem_time ? "modem_network" : (g_post.gnss_time ? "gnss_utc" : "unavailable");
     s += "\n";
     s += "system_time_local=";
     s += current_time_text();
@@ -173,6 +177,23 @@ static String make_post_summary_text()
     s += g_post.modem_time ? "PASS " : "FAIL ";
     s += g_post.modem_time ? g_timestamp : "no_valid_network_time";
     s += "\n";
+    s += "cellular_time_status=";
+    s += g_post.modem_time ? "network_time_valid" : "network_registration_timeout_or_missing_sim";
+    s += "\n";
+    s += "gnss_timestamp=";
+    s += g_post.gnss_time ? "PASS " : "FAIL ";
+    s += g_post.gnss_time ? g_timestamp : "unavailable";
+    s += "\n";
+    s += "gnss_time_status=";
+    if (g_post.gnss_time)
+        s += "trusted_position_time";
+    else if (!g_post.gnss_ready)
+        s += "gnss_command_unavailable";
+    else if (!g_gnss.position_valid)
+        s += "invalid_position_or_missing_gnss_antenna";
+    else
+        s += "not_used";
+    s += "\n";
     s += "system_time=";
     s += g_post.system_time ? "PASS" : "FAIL";
     s += "\n";
@@ -184,6 +205,12 @@ static String make_post_summary_text()
     s += "\n";
     s += "gnss_fix=";
     s += g_post.gnss_fix ? "YES" : "NO";
+    s += "\n";
+    s += "gnss_raw_fix=";
+    s += g_gnss.fix ? "YES" : "NO";
+    s += "\n";
+    s += "gnss_position_valid=";
+    s += g_gnss.position_valid ? "YES" : "NO";
     s += "\n";
     s += "gnss_utc=";
     s += g_gnss.utc[0] ? g_gnss.utc : "unavailable";
@@ -202,6 +229,9 @@ static String make_post_summary_text()
     s += "\n";
     s += "gnss_satellites_view=";
     s += g_gnss.satellites[0] ? g_gnss.satellites : "unavailable";
+    s += "\n";
+    s += "gnss_satellite_count=";
+    s += g_gnss.satellite_count;
     s += "\n";
     s += "gnss_raw=";
     s += g_gnss.raw[0] ? g_gnss.raw : "unavailable";
@@ -296,15 +326,18 @@ static void print_post_summary()
                   g_config.inference.occurrence);
     print_post_line("modem_at", g_post.modem_ready);
     print_post_line("modem_timestamp", g_post.modem_time, g_post.modem_time ? g_timestamp : "no valid network time");
+    print_post_line("gnss_timestamp", g_post.gnss_time, g_post.gnss_time ? g_timestamp : "unavailable");
     print_post_line("system_time", g_post.system_time);
     print_post_line("gnss_command", g_post.gnss_ready, g_post.gnss_ready ? "AT+CGNSPWR/AT+CGNSINF" : "unavailable");
     if (g_post.gnss_fix)
         print_post_line("gnss_fix", true, "position fix");
     else
-        print_post_warn("gnss_fix", "no fix yet");
+        print_post_warn("gnss_fix", g_gnss.fix ? "raw fix rejected" : "no fix yet");
     if (g_post.gnss_ready) {
-        Serial.printf("POST: gnss_powered=%s utc=%s lat=%s lon=%s sats=%s\n",
+        Serial.printf("POST: gnss_powered=%s raw_fix=%s valid=%s utc=%s lat=%s lon=%s sats=%s\n",
                       g_gnss.powered ? "YES" : "NO",
+                      g_gnss.fix ? "YES" : "NO",
+                      g_gnss.position_valid ? "YES" : "NO",
                       g_gnss.utc[0] ? g_gnss.utc : "-",
                       g_gnss.latitude[0] ? g_gnss.latitude : "-",
                       g_gnss.longitude[0] ? g_gnss.longitude : "-",
@@ -397,6 +430,27 @@ static bool set_system_time_from_timestamp(const char *ts)
     return true;
 }
 
+static bool gnss_utc_to_timestamp(const char *utc, char *out, size_t out_len)
+{
+    if (!utc || !out || out_len < 16)
+        return false;
+
+    if (strlen(utc) < 14)
+        return false;
+
+    for (uint8_t i = 0; i < 14; i++) {
+        if (!is_digit(utc[i]))
+            return false;
+    }
+
+    int year = 0;
+    if (!parse4(utc, year) || year < 2020 || year > 2099)
+        return false;
+
+    snprintf(out, out_len, "%.8s_%.6s", utc, utc + 8);
+    return true;
+}
+
 static bool print_idle_heartbeat()
 {
     static bool serial_post_copy_printed = false;
@@ -417,14 +471,17 @@ static bool print_idle_heartbeat()
     }
 
     const Gv2UartStats &uart_stats = gv2_uart_stats();
-    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s\n",
+    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu gv2_errors=%lu gv2_last_error=%u/%u heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s\n",
                   (unsigned long)now,
                   (unsigned long)uart_stats.bytes,
                   (unsigned long)uart_stats.jpeg_frames,
                   (unsigned long)uart_stats.state_frames,
+                  (unsigned long)uart_stats.error_frames,
+                  (unsigned)uart_stats.last_error_code,
+                  (unsigned)uart_stats.last_error_detail,
                   ESP.getFreeHeap(),
                   g_post.modem_ready ? "OK" : "NO",
-                  g_post.modem_time ? g_timestamp : "NO",
+                  (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "NO",
                   g_post.gnss_ready ? "OK" : "NO",
                   g_post.gnss_fix ? "YES" : "NO",
                   g_post.gv2_uart ? "OK" : "NO",
@@ -454,12 +511,21 @@ void setup()
 
     print_system_info();
 
+    Serial.println("POST: SD card init begin");
+    g_post.sd_card = sdcard_init();
+    print_post_line("sd_card", g_post.sd_card);
+    g_post.sd_config = sdcard_ensure_config();
+    print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
+    bool config_loaded = sdcard_load_config(g_config);
+    print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
+
     Serial.println("POST: modem init begin");
     if (modem_init_early()) {
         g_post.modem_ready = true;
         print_post_line("modem_at", true);
         Serial.println("POST: modem timestamp begin; waiting for network time");
-        if (modem_get_timestamp(g_timestamp, sizeof(g_timestamp))) {
+        uint32_t network_timeout_ms = (uint32_t)g_config.time.network_timeout_seconds * 1000UL;
+        if (modem_get_timestamp(g_timestamp, sizeof(g_timestamp), network_timeout_ms)) {
             g_post.modem_time = true;
             Serial.printf("POST: modem_timestamp [%s]\n", g_timestamp);
             g_post.system_time = set_system_time_from_timestamp(g_timestamp);
@@ -470,24 +536,28 @@ void setup()
 
         Serial.println("POST: GNSS probe begin; sampling up to 10 seconds for fix");
         g_post.gnss_ready = modem_gnss_probe(g_gnss, 10000);
-        g_post.gnss_fix = g_gnss.fix;
+        g_post.gnss_fix = g_gnss.position_valid;
         print_post_line("gnss_command", g_post.gnss_ready, g_post.gnss_ready ? "AT+CGNSPWR/AT+CGNSINF" : "unavailable");
         if (g_post.gnss_fix)
             print_post_line("gnss_fix", true, "position fix");
         else
-            print_post_warn("gnss_fix", "no fix yet");
+            print_post_warn("gnss_fix", g_gnss.fix ? "raw fix rejected" : "no fix yet");
+
+        if (!g_post.system_time && g_config.time.allow_gnss_fallback) {
+            char gnss_timestamp[32] = {0};
+            if (g_gnss.position_valid && gnss_utc_to_timestamp(g_gnss.utc, gnss_timestamp, sizeof(gnss_timestamp))) {
+                strlcpy(g_timestamp, gnss_timestamp, sizeof(g_timestamp));
+                g_post.gnss_time = true;
+                g_post.system_time = set_system_time_from_timestamp(g_timestamp);
+                print_post_line("gnss_timestamp", g_post.system_time, g_post.system_time ? g_timestamp : "invalid");
+            } else {
+                print_post_warn("gnss_timestamp", g_gnss.position_valid ? "unavailable" : "trusted GNSS position unavailable");
+            }
+        }
     } else {
         print_post_line("modem_at", false);
     }
     Serial.flush();
-
-    Serial.println("POST: SD card init begin");
-    g_post.sd_card = sdcard_init();
-    print_post_line("sd_card", g_post.sd_card);
-    g_post.sd_config = sdcard_ensure_config();
-    print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
-    bool config_loaded = sdcard_load_config(g_config);
-    print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
 
     bool web_started = web_init(g_config.web);
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");

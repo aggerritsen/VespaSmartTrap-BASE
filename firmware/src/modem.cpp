@@ -2,6 +2,8 @@
 
 #include "modem.h"
 
+#include <math.h>
+#include <stdlib.h>
 #include <Wire.h>
 
 // XPowers
@@ -133,6 +135,16 @@ static void copy_field(char *dst, size_t dst_len, const String &value)
     snprintf(dst, dst_len, "%s", value.c_str());
 }
 
+static bool has_nonzero_position(const char *latitude, const char *longitude)
+{
+    if (!latitude || !longitude || !latitude[0] || !longitude[0])
+        return false;
+
+    double lat = atof(latitude);
+    double lon = atof(longitude);
+    return fabs(lat) > 0.000001 || fabs(lon) > 0.000001;
+}
+
 static bool parse_gnss_info_line(const String &line_in, ModemGnssInfo &info)
 {
     String line = line_in;
@@ -158,6 +170,11 @@ static bool parse_gnss_info_line(const String &line_in, ModemGnssInfo &info)
     copy_field(info.altitude_m, sizeof(info.altitude_m), csv_field(line, 5));
     copy_field(info.speed_kph, sizeof(info.speed_kph), csv_field(line, 6));
     copy_field(info.satellites, sizeof(info.satellites), csv_field(line, 14));
+    info.satellite_count = (uint8_t)constrain(info.satellites[0] ? atoi(info.satellites) : 0, 0, 255);
+    info.position_valid = info.powered &&
+                          info.fix &&
+                          info.satellite_count >= 3 &&
+                          has_nonzero_position(info.latitude, info.longitude);
 
     return info.powered;
 }
@@ -222,13 +239,13 @@ bool modem_init_early()
     return true;
 }
 
-bool modem_get_timestamp(char *out, size_t out_len)
+bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms)
 {
     if (!out || out_len < 17)
         return false;
 
     Serial.println("MODEM: waiting for network registration");
-    if (!wait_for_network_registration(60000))
+    if (!wait_for_network_registration(network_timeout_ms))
     {
         Serial.println("MODEM: network registration timeout");
         return false;
@@ -297,15 +314,16 @@ bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms)
             if (parse_gnss_info_line(line, info))
             {
                 saw_powered_response = true;
-                Serial.printf("GNSS: powered=%s fix=%s utc=%s lat=%s lon=%s sats=%s\n",
+                Serial.printf("GNSS: powered=%s fix_raw=%s valid=%s utc=%s lat=%s lon=%s sats=%s\n",
                               info.powered ? "YES" : "NO",
                               info.fix ? "YES" : "NO",
+                              info.position_valid ? "YES" : "NO",
                               info.utc[0] ? info.utc : "-",
                               info.latitude[0] ? info.latitude : "-",
                               info.longitude[0] ? info.longitude : "-",
                               info.satellites[0] ? info.satellites : "-");
 
-                if (info.fix)
+                if (info.position_valid)
                     return true;
             }
         }
