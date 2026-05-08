@@ -21,6 +21,7 @@ The current base firmware provides the following operational features:
 - JSON Lines frame logging with timestamp, GNSS data, inference result, bounding box, CRC status, actuator result, saved filename, and firmware identity.
 - Power telemetry logging to `/power.log` at a configurable interval.
 - Helper scripts for building and flashing the Grove Vision AI V2 firmware image and model.
+- [VSTtool](https://vsttool.org) support for flashing firmware to the MCUs used in the project.
 - Desktop image-viewer tooling and sample images for visual validation work.
 
 ## System Architecture
@@ -205,6 +206,8 @@ The helper uploads to COM5 and opens the serial monitor on COM5 at 115200 baud b
 ```
 
 The underlying PlatformIO environment is `t-sim7080g-s3`.
+
+[VSTtool](https://vsttool.org) also exists as a dedicated flashing utility for firmware updates on the MCUs used by VST-BASE. Use it when you need a single tool-oriented flashing workflow instead of the board-specific helper scripts above and below.
 
 ## Build And Flash The GV2 Firmware
 
