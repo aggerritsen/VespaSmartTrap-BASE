@@ -30,6 +30,9 @@ struct WebConfig {
 
 struct PowerConfig {
     uint32_t log_interval_seconds = 60;
+    uint8_t deep_sleep = 1;
+    uint8_t deep_sleep_start_hour = 18;
+    uint8_t deep_sleep_end_hour = 6;
 };
 
 struct TimeConfig {

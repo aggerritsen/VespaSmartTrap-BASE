@@ -24,6 +24,8 @@ static const char *DEFAULT_CONFIG =
     "  \"schema_version\": 1,\n"
     "  \"device_name\": \"vst-base-001\",\n"
     "  \"uart\": {\n"
+    "    \"rx_gpio\": 16,\n"
+    "    \"tx_gpio\": 17,\n"
     "    \"baud\": 921600\n"
     "  },\n"
     "  \"logging\": {\n"
@@ -51,7 +53,10 @@ static const char *DEFAULT_CONFIG =
     "    \"occurrence\": 3\n"
     "  },\n"
     "  \"power\": {\n"
-    "    \"log_interval_seconds\": 60\n"
+    "    \"log_interval_seconds\": 60,\n"
+    "    \"deep_sleep\": 1,\n"
+    "    \"deep_sleep_start_hour\": 18,\n"
+    "    \"deep_sleep_end_hour\": 6\n"
     "  },\n"
     "  \"web\": {\n"
     "    \"mode\": 2,\n"
@@ -69,6 +74,118 @@ static const char *sd_card_type_name(uint8_t type)
         case CARD_SDHC: return "SDHC/SDXC";
         default: return "UNKNOWN";
     }
+}
+
+static JsonObject ensure_object(JsonDocument &doc, const char *name, bool &changed)
+{
+    JsonVariant v = doc[name];
+    if (v.is<JsonObject>())
+        return v.as<JsonObject>();
+
+    changed = true;
+    return doc[name].to<JsonObject>();
+}
+
+static bool ensure_string(JsonObject obj, const char *name, const char *value)
+{
+    if (!obj[name].isNull())
+        return false;
+
+    obj[name] = value;
+    return true;
+}
+
+static bool ensure_uint(JsonObject obj, const char *name, uint32_t value)
+{
+    if (!obj[name].isNull())
+        return false;
+
+    obj[name] = value;
+    return true;
+}
+
+static bool ensure_int(JsonObject obj, const char *name, int value)
+{
+    if (!obj[name].isNull())
+        return false;
+
+    obj[name] = value;
+    return true;
+}
+
+static bool ensure_float(JsonObject obj, const char *name, float value)
+{
+    if (!obj[name].isNull())
+        return false;
+
+    obj[name] = value;
+    return true;
+}
+
+static bool ensure_bool(JsonObject obj, const char *name, bool value)
+{
+    if (!obj[name].isNull())
+        return false;
+
+    obj[name] = value;
+    return true;
+}
+
+static bool ensure_config_defaults(JsonDocument &doc)
+{
+    bool changed = false;
+
+    if (doc["schema_version"].isNull()) {
+        doc["schema_version"] = 1;
+        changed = true;
+    }
+    if (doc["device_name"].isNull()) {
+        doc["device_name"] = "vst-base-001";
+        changed = true;
+    }
+
+    JsonObject uart = ensure_object(doc, "uart", changed);
+    changed |= ensure_uint(uart, "rx_gpio", 16);
+    changed |= ensure_uint(uart, "tx_gpio", 17);
+    changed |= ensure_uint(uart, "baud", 921600);
+
+    JsonObject logging = ensure_object(doc, "logging", changed);
+    changed |= ensure_string(logging, "post_log", "/post.log");
+    changed |= ensure_string(logging, "image_prefix", "/frame_");
+
+    JsonObject features = ensure_object(doc, "features", changed);
+    changed |= ensure_bool(features, "gnss_probe", true);
+    changed |= ensure_bool(features, "ack_frames", true);
+
+    JsonObject time = ensure_object(doc, "time", changed);
+    changed |= ensure_uint(time, "network_timeout_seconds", 10);
+    changed |= ensure_bool(time, "allow_gnss_fallback", true);
+
+    JsonObject stepper = ensure_object(doc, "stepper", changed);
+    changed |= ensure_uint(stepper, "speed_steps_per_second", 400);
+    changed |= ensure_uint(stepper, "rotation_degrees", 90);
+    changed |= ensure_uint(stepper, "steps_per_revolution", 2048);
+    changed |= ensure_uint(stepper, "reverse_wait_ms", 1000);
+    changed |= ensure_string(stepper, "start_direction", "ccw");
+
+    JsonObject inference = ensure_object(doc, "inference", changed);
+    changed |= ensure_float(inference, "confidence_threshold", 0.89f);
+    changed |= ensure_int(inference, "detected_class", 3);
+    changed |= ensure_uint(inference, "occurrence", 3);
+
+    JsonObject power = ensure_object(doc, "power", changed);
+    changed |= ensure_uint(power, "log_interval_seconds", 60);
+    changed |= ensure_uint(power, "deep_sleep", 1);
+    changed |= ensure_uint(power, "deep_sleep_start_hour", 18);
+    changed |= ensure_uint(power, "deep_sleep_end_hour", 6);
+
+    JsonObject web = ensure_object(doc, "web", changed);
+    changed |= ensure_uint(web, "mode", 2);
+    changed |= ensure_string(web, "ssid", "VST-BASE");
+    changed |= ensure_string(web, "password", "");
+    changed |= ensure_bool(web, "append_mac", true);
+
+    return changed;
 }
 
 static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id)
@@ -175,6 +292,43 @@ bool sdcard_ensure_config()
         }
 
         Serial.printf("SD: config found path=%s bytes=%u\n", CONFIG_PATH, (unsigned)size);
+        f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+        if (!f)
+        {
+            Serial.printf("SD: config reopen FAILED path=%s\n", CONFIG_PATH);
+            return false;
+        }
+
+        JsonDocument doc;
+        DeserializationError err = deserializeJson(doc, f);
+        f.close();
+        if (err)
+        {
+            Serial.printf("SD: config parse FAILED path=%s error=%s\n",
+                          CONFIG_PATH,
+                          err.c_str());
+            return false;
+        }
+
+        if (!ensure_config_defaults(doc))
+            return true;
+
+        if (SD_MMC.exists(CONFIG_PATH))
+            SD_MMC.remove(CONFIG_PATH);
+
+        f = SD_MMC.open(CONFIG_PATH, FILE_WRITE);
+        if (!f)
+        {
+            Serial.printf("SD: config update open FAILED path=%s\n", CONFIG_PATH);
+            return false;
+        }
+
+        size_t written = serializeJsonPretty(doc, f);
+        f.println();
+        f.close();
+        Serial.printf("SD: config updated with missing defaults path=%s bytes=%u\n",
+                      CONFIG_PATH,
+                      (unsigned)written);
         return true;
     }
 
@@ -302,12 +456,27 @@ bool sdcard_load_config(BaseConfig &config)
     JsonObject power = doc["power"];
     config.power.log_interval_seconds =
         power["log_interval_seconds"] | config.power.log_interval_seconds;
+    if (!power["deep_sleep"].isNull())
+        config.power.deep_sleep = power["deep_sleep"].as<uint8_t>();
+    else
+        config.power.deep_sleep = power["deep_sleep_enabled"] | config.power.deep_sleep;
+    config.power.deep_sleep_start_hour =
+        power["deep_sleep_start_hour"] | config.power.deep_sleep_start_hour;
+    config.power.deep_sleep_end_hour =
+        power["deep_sleep_end_hour"] | config.power.deep_sleep_end_hour;
     if (config.power.log_interval_seconds == 0)
         config.power.log_interval_seconds = 60;
     if (config.power.log_interval_seconds > 86400)
         config.power.log_interval_seconds = 86400;
+    config.power.deep_sleep = config.power.deep_sleep ? 1 : 0;
+    if (config.power.deep_sleep_start_hour > 23)
+        config.power.deep_sleep_start_hour = 18;
+    if (config.power.deep_sleep_end_hour > 23)
+        config.power.deep_sleep_end_hour = 6;
+    if (config.power.deep_sleep_start_hour == config.power.deep_sleep_end_hour)
+        config.power.deep_sleep = 0;
 
-    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s\n",
+    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep=%s power_sleep_window=%02u:00-%02u:00 time_network_timeout_seconds=%u time_gnss_fallback=%s\n",
                   config.device_name,
                   config.uart.rx_gpio,
                   config.uart.tx_gpio,
@@ -323,6 +492,9 @@ bool sdcard_load_config(BaseConfig &config)
                   config.web.mode,
                   config.web.ssid,
                   (unsigned long)config.power.log_interval_seconds,
+                  config.power.deep_sleep ? "YES" : "NO",
+                  config.power.deep_sleep_start_hour,
+                  config.power.deep_sleep_end_hour,
                   config.time.network_timeout_seconds,
                   config.time.allow_gnss_fallback ? "YES" : "NO");
 

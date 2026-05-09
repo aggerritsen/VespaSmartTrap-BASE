@@ -60,6 +60,7 @@ struct JpegRxState {
 struct StateRxState {
     uint8_t magic_window[4] = {0, 0, 0, 0};
     uint8_t magic_filled = 0;
+    bool waiting_state_payload = false;
 };
 
 struct ErrorRxState {
@@ -176,6 +177,7 @@ static void reset_uart_sync_windows()
     jpeg_rx.magic_filled = 0;
     memset(state_rx.magic_window, 0, sizeof(state_rx.magic_window));
     state_rx.magic_filled = 0;
+    state_rx.waiting_state_payload = false;
     memset(error_rx.magic_window, 0, sizeof(error_rx.magic_window));
     error_rx.magic_filled = 0;
     error_rx.waiting_error_payload = false;
@@ -613,6 +615,10 @@ bool gv2_uart_init(const UartConfig &config)
     if (active_config.baud == 0)
         active_config.baud = GV2_UART_BAUD_CFG;
 
+    abort_active_jpeg();
+    reset_uart_sync_windows();
+    stats = Gv2UartStats{};
+
     size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
     Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
     Gv2Serial.setRxTimeout(1);
@@ -627,6 +633,18 @@ bool gv2_uart_init(const UartConfig &config)
 void gv2_uart_poll()
 {
     while (Gv2Serial.available() > 0) {
+        if (state_rx.waiting_state_payload) {
+            int state = Gv2Serial.read();
+            if (state < 0)
+                break;
+
+            state_rx.waiting_state_payload = false;
+            stats.bytes++;
+            stats.state_frames++;
+            stats.last_state = (uint8_t)state;
+            continue;
+        }
+
         if (error_rx.waiting_error_payload) {
             if (!read_error_payload())
                 break;
@@ -780,6 +798,8 @@ void gv2_uart_poll()
                     stats.state_frames++;
                     stats.last_state = (uint8_t)state;
                 }
+            } else {
+                state_rx.waiting_state_payload = true;
             }
         }
 

@@ -141,8 +141,6 @@ bool power_init(const PowerConfig &config)
     uint32_t interval_ms = g_power_config.log_interval_seconds * 1000UL;
     g_last_log_ms = millis() - interval_ms;
 
-    Serial.printf("POWER: PMU telemetry init OK log_interval=%lu seconds\n",
-                  (unsigned long)g_power_config.log_interval_seconds);
     return true;
 }
 
@@ -176,18 +174,7 @@ bool power_read_snapshot(PowerSnapshot &snapshot)
 
 void power_print_snapshot(const PowerSnapshot &snapshot)
 {
-    Serial.printf("POWER: bat=%dmV soc=%d%% vbus=%umV vbus_good=%s vsys=%umV direction=%s charge=%s pmu_temp=%.2fC thermal=%s current_limit=%s\n",
-                  (int)snapshot.battery_mv,
-                  snapshot.battery_percent,
-                  (unsigned)snapshot.vbus_mv,
-                  snapshot.vbus_good ? "YES" : "NO",
-                  (unsigned)snapshot.vsys_mv,
-                  current_direction_name(snapshot),
-                  charger_status_name(snapshot.charger_status),
-                  snapshot.pmu_temp_c,
-                  snapshot.thermal_regulation ? "YES" : "NO",
-                  snapshot.current_limit ? "YES" : "NO");
-    Serial.flush();
+    (void)snapshot;
 }
 
 void power_log_snapshot_if_due(const PowerSnapshot &snapshot)
@@ -200,15 +187,25 @@ void power_log_snapshot_if_due(const PowerSnapshot &snapshot)
     }
 }
 
-void power_poll()
+void power_log_snapshot_when_due()
 {
     if (!g_power_ready)
+        return;
+
+    uint32_t now = millis();
+    uint32_t interval_ms = g_power_config.log_interval_seconds * 1000UL;
+    if (now - g_last_log_ms < interval_ms)
         return;
 
     PowerSnapshot snapshot;
     if (!power_read_snapshot(snapshot))
         return;
 
-    power_print_snapshot(snapshot);
-    power_log_snapshot_if_due(snapshot);
+    g_last_log_ms = now;
+    sdcard_append_log(POWER_LOG_PATH, make_power_log_line(snapshot));
+}
+
+void power_poll()
+{
+    power_log_snapshot_when_due();
 }

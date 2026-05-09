@@ -29,3 +29,6 @@ struct ModemGnssInfo {
 // Powers GNSS with AT+CGNSPWR=1 and samples AT+CGNSINF.
 // Returns true when the GNSS AT command path works. A position fix is optional.
 bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms = 5000);
+
+// Best-effort shutdown before ESP32 deep sleep.
+void modem_prepare_for_sleep();

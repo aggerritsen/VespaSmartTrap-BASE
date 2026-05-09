@@ -2,6 +2,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include "esp_sleep.h"
 #include "esp_system.h"
 
 #include "sdcard.h"
@@ -87,6 +88,79 @@ static String current_time_text()
     char buf[32];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm);
     return String(buf);
+}
+
+static bool current_local_time(struct tm &tm)
+{
+    time_t now = time(nullptr);
+    if (now <= 1700000000)
+        return false;
+
+    return localtime_r(&now, &tm) != nullptr;
+}
+
+static bool is_hour_in_sleep_window(uint8_t hour, const PowerConfig &config)
+{
+    uint8_t start = config.deep_sleep_start_hour;
+    uint8_t end = config.deep_sleep_end_hour;
+
+    if (start < end)
+        return hour >= start && hour < end;
+
+    return hour >= start || hour < end;
+}
+
+static uint32_t seconds_until_sleep_window_end(const struct tm &tm, const PowerConfig &config)
+{
+    int now_seconds = tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec;
+    int end_seconds = config.deep_sleep_end_hour * 3600;
+    int delta = end_seconds - now_seconds;
+
+    if (delta <= 0)
+        delta += 24 * 3600;
+
+    return (uint32_t)delta;
+}
+
+static void enter_deep_sleep_until(uint32_t sleep_seconds)
+{
+    if (sleep_seconds < 60)
+        sleep_seconds = 60;
+
+    Serial.printf("POWER: entering deep sleep for %lu seconds\n", (unsigned long)sleep_seconds);
+    sdcard_append_log("/power.log", String("{\"event\":\"deep_sleep_enter\",\"seconds\":") +
+                                      String((unsigned long)sleep_seconds) +
+                                      String(",\"reason\":\"scheduled_night_window\"}\n"));
+    Serial.flush();
+
+    modem_prepare_for_sleep();
+    esp_sleep_enable_timer_wakeup((uint64_t)sleep_seconds * 1000000ULL);
+    esp_deep_sleep_start();
+}
+
+static void sleep_if_in_configured_window(const char *phase)
+{
+    if (!g_config.power.deep_sleep)
+        return;
+
+    struct tm tm{};
+    if (!current_local_time(tm)) {
+        Serial.printf("POWER: sleep schedule skipped phase=%s reason=no_valid_system_time\n", phase);
+        return;
+    }
+
+    if (!is_hour_in_sleep_window((uint8_t)tm.tm_hour, g_config.power))
+        return;
+
+    uint32_t sleep_seconds = seconds_until_sleep_window_end(tm, g_config.power);
+    Serial.printf("POWER: sleep window active phase=%s now=%02d:%02d:%02d window=%02u:00-%02u:00\n",
+                  phase,
+                  tm.tm_hour,
+                  tm.tm_min,
+                  tm.tm_sec,
+                  g_config.power.deep_sleep_start_hour,
+                  g_config.power.deep_sleep_end_hour);
+    enter_deep_sleep_until(sleep_seconds);
 }
 
 static String make_post_summary_text()
@@ -272,6 +346,18 @@ static String make_post_summary_text()
     s += "power_log_interval_seconds=";
     s += g_config.power.log_interval_seconds;
     s += "\n";
+    s += "power_deep_sleep=";
+    s += g_config.power.deep_sleep;
+    s += "\n";
+    s += "power_deep_sleep_window=";
+    if (g_config.power.deep_sleep_start_hour < 10)
+        s += "0";
+    s += g_config.power.deep_sleep_start_hour;
+    s += ":00-";
+    if (g_config.power.deep_sleep_end_hour < 10)
+        s += "0";
+    s += g_config.power.deep_sleep_end_hour;
+    s += ":00\n";
     s += "==================================================\n\n";
 
     return s;
@@ -320,6 +406,10 @@ static void print_post_summary()
     Serial.printf("POST: stepper_wait_ms   [%u]\n", g_config.stepper.reverse_wait_ms);
     Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
     Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
+    Serial.printf("POST: deep_sleep       [%u %02u:00-%02u:00]\n",
+                  g_config.power.deep_sleep,
+                  g_config.power.deep_sleep_start_hour,
+                  g_config.power.deep_sleep_end_hour);
     Serial.printf("POST: inference_filter  [class=%d confidence>=%.3f occurrence=%u]\n",
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
@@ -456,8 +546,12 @@ static bool print_idle_heartbeat()
     static bool serial_post_copy_printed = false;
     static uint32_t last_ms = 0;
     uint32_t now = millis();
+    uint32_t interval_ms = g_config.power.log_interval_seconds * 1000UL;
 
-    if (now - last_ms < 5000)
+    if (interval_ms == 0)
+        interval_ms = 60000UL;
+
+    if (now - last_ms < interval_ms)
         return false;
 
     last_ms = now;
@@ -492,12 +586,7 @@ static bool print_idle_heartbeat()
 
 static void print_power_after_heartbeat()
 {
-    PowerSnapshot snapshot;
-    if (!power_read_snapshot(snapshot))
-        return;
-
-    power_print_snapshot(snapshot);
-    power_log_snapshot_if_due(snapshot);
+    power_log_snapshot_when_due();
 }
 
 /* =========================================================
@@ -559,21 +648,23 @@ void setup()
     }
     Serial.flush();
 
+    sleep_if_in_configured_window("post_time_sync");
+
     bool web_started = web_init(g_config.web);
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
 
     g_post.power = power_init(g_config.power);
     print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
 
+    stepper_init(g_config.stepper);
+    stepper_run_post_test_cycle();
+
     g_post.gv2_uart = gv2_uart_init(g_config.uart);
     gv2_uart_set_log_context(&g_config, &g_gnss);
     print_post_line("gv2_uart", g_post.gv2_uart);
 
-    stepper_init(g_config.stepper);
     write_post_summary_to_sd();
-
     print_post_summary();
-    stepper_run_post_test_cycle();
 }
 
 /* =========================================================
@@ -581,6 +672,7 @@ void setup()
    ========================================================= */
 void loop()
 {
+    sleep_if_in_configured_window("loop");
     gv2_uart_poll();
     web_loop();
     if (print_idle_heartbeat())

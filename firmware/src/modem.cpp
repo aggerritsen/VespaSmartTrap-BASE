@@ -34,6 +34,8 @@ static constexpr uint32_t MODEM_BAUD = 115200;
 
 static XPowersPMU PMU;
 static TinyGsm modem(Serial1);
+static bool g_pmu_ready = false;
+static bool g_serial_ready = false;
 
 static bool is_plausible_year(int year)
 {
@@ -58,9 +60,11 @@ static bool pmu_enable_modem_rails()
     if (!PMU.begin(Wire, AXP2101_SLAVE_ADDRESS, PMU_I2C_SDA, PMU_I2C_SCL))
     {
         Serial.println("MODEM: PMU init FAILED");
+        g_pmu_ready = false;
         return false;
     }
 
+    g_pmu_ready = true;
     Serial.println("MODEM: PMU init OK");
     PMU.setDC3Voltage(3000);
     PMU.enableDC3();
@@ -218,6 +222,7 @@ bool modem_init_early()
         return false;
 
     Serial1.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RXD, MODEM_TXD);
+    g_serial_ready = true;
 
     Serial.println("MODEM: Serial1 begin baud=115200 RX=4 TX=5");
     Serial.print("MODEM: probing AT");
@@ -339,4 +344,25 @@ bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms)
 
     Serial.println("GNSS: no usable CGNSINF response");
     return info.command_ok;
+}
+
+void modem_prepare_for_sleep()
+{
+    Serial.println("MODEM: preparing for deep sleep");
+
+    if (g_serial_ready) {
+        modem.sendAT("+CGNSPWR=0");
+        modem.waitResponse(2000);
+        modem.sendAT("+CPOWD=1");
+        modem.waitResponse(3000);
+    }
+
+    if (g_pmu_ready) {
+        PMU.disableBLDO2();
+        PMU.disableDC3();
+        Serial.println("MODEM: GNSS off; modem rails disabled");
+    } else {
+        Serial.println("MODEM: PMU was not ready; rails not changed");
+    }
+    Serial.flush();
 }

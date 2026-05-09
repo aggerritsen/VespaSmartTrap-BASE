@@ -13,6 +13,8 @@ T-SIM7080G-S3
 Custom PCB
   - T-SIM7080G-S3 interface
   - GV2 XIAO-slot style connector
+  - D0 / GPIO03 exposed as the actuator-active output
+  - D1 / GPIO46 exposed as a reserved input-only line
   - optional motor / actuator hardware references
 
 Grove Vision AI V2 stick-on module

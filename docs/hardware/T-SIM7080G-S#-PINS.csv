@@ -2,7 +2,7 @@ GPIO,Header,Primary Function / Label,Status,Notes
 0,P2.10,BOOT / RESET,RESERVED,Boot/strapping pin – do not use
 1,P2.3,TOUCH01 / ADC1_CH0,FREE_OUTPUT,Safe GPIO output
 2,P2.4,TOUCH02 / ADC1_CH1,FREE_OUTPUT,Safe GPIO output
-3,P1.7,I2C SDA (Vision AI),USED,Locked I2C bus
+3,P1.7,D0 / ACTUATOR_ACTIVE,USED,Actuator active output exposed on custom PCB
 4,,MODEM_RXD,USED,Modem UART RX
 5,,MODEM_TXD,USED,Modem UART TX
 7,,PMU_I2C_SCL,USED,PMU I2C
@@ -28,6 +28,6 @@ GPIO,Header,Primary Function / Label,Status,Notes
 43,P2.5,CLK_OUT1,CONDITIONAL,Clock output capable
 44,P2.6,CLK_OUT2,CONDITIONAL,Clock output capable
 45,P2.11,STRAP_PIN,AVOID,Strapping pin – risky for output
-46,P1.8,INPUT_ONLY,UNUSABLE,Input-only on ESP32-S3
+46,P1.8,D1 / INPUT_ONLY,RESERVED_INPUT,Input-only on ESP32-S3; exposed on custom PCB but not usable as driven output
 47,P2.13,GPIO,FREE_OUTPUT,Safe GPIO output
 48,P2.12,GPIO,FREE_OUTPUT,Safe GPIO output

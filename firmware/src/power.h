@@ -28,4 +28,5 @@ bool power_init(const PowerConfig &config);
 bool power_read_snapshot(PowerSnapshot &snapshot);
 void power_print_snapshot(const PowerSnapshot &snapshot);
 void power_log_snapshot_if_due(const PowerSnapshot &snapshot);
+void power_log_snapshot_when_due();
 void power_poll();
