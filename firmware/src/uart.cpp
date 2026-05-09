@@ -18,6 +18,9 @@
 #ifndef GV2_UART_BAUD_CFG
   #define GV2_UART_BAUD_CFG 921600
 #endif
+#ifndef GV2_POWER_GPIO_CFG
+  #define GV2_POWER_GPIO_CFG 43
+#endif
 
 static HardwareSerial Gv2Serial(2);
 
@@ -318,6 +321,37 @@ void gv2_uart_set_log_context(const BaseConfig *config, const ModemGnssInfo *gns
 {
     log_config = config;
     log_gnss = gnss;
+}
+
+void gv2_power_on()
+{
+    if (GV2_POWER_GPIO_CFG < 0)
+        return;
+
+    pinMode(GV2_POWER_GPIO_CFG, OUTPUT);
+    digitalWrite(GV2_POWER_GPIO_CFG, HIGH);
+    delay(100);
+    Serial.printf("GV2: power ON gpio=%d\n", GV2_POWER_GPIO_CFG);
+}
+
+void gv2_prepare_for_sleep(const UartConfig &config)
+{
+    abort_active_jpeg();
+    reset_uart_sync_windows();
+    Gv2Serial.end();
+
+    pinMode(config.rx_gpio, INPUT);
+    pinMode(config.tx_gpio, INPUT);
+
+    if (GV2_POWER_GPIO_CFG >= 0) {
+        digitalWrite(GV2_POWER_GPIO_CFG, LOW);
+        pinMode(GV2_POWER_GPIO_CFG, OUTPUT);
+        delay(20);
+        Serial.printf("GV2: power OFF gpio=%d rx=%u tx=%u\n",
+                      GV2_POWER_GPIO_CFG,
+                      (unsigned)config.rx_gpio,
+                      (unsigned)config.tx_gpio);
+    }
 }
 
 static String current_timestamp()

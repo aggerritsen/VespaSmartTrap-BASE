@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -92,6 +93,9 @@ static String current_time_text()
 
 static bool current_local_time(struct tm &tm)
 {
+    if (!g_post.system_time)
+        return false;
+
     time_t now = time(nullptr);
     if (now <= 1700000000)
         return false;
@@ -122,18 +126,78 @@ static uint32_t seconds_until_sleep_window_end(const struct tm &tm, const PowerC
     return (uint32_t)delta;
 }
 
+static const char *deep_sleep_reason()
+{
+    switch (g_config.power.deep_sleep) {
+        case 1: return "scheduled_night_window";
+        case 2: return "scheduled_battery_only";
+        default: return "disabled";
+    }
+}
+
+static bool deep_sleep_power_condition_allows(const char *phase)
+{
+    if (g_config.power.deep_sleep != 2)
+        return true;
+
+    static uint32_t last_loop_check_ms = 0;
+    if (phase && strcmp(phase, "loop") == 0) {
+        uint32_t now_ms = millis();
+        uint32_t interval_ms = g_config.power.log_interval_seconds * 1000UL;
+        if (interval_ms == 0)
+            interval_ms = 60000UL;
+        if (last_loop_check_ms != 0 && now_ms - last_loop_check_ms < interval_ms)
+            return false;
+        last_loop_check_ms = now_ms;
+    }
+
+    PowerSnapshot snapshot;
+    if (!power_read_snapshot(snapshot)) {
+        Serial.printf("POWER: sleep schedule skipped phase=%s reason=power_snapshot_unavailable mode=2\n", phase);
+        return false;
+    }
+
+    bool external_power_present = snapshot.vbus_good || snapshot.vbus_in || snapshot.vbus_mv > 4200;
+    bool battery_only_discharge = snapshot.battery_present && snapshot.discharging && !external_power_present;
+
+    if (!battery_only_discharge) {
+        Serial.printf("POWER: sleep schedule skipped phase=%s reason=external_power_or_not_discharging mode=2 battery_present=%s discharging=%s vbus_good=%s vbus_in=%s vbus_mv=%u\n",
+                      phase,
+                      snapshot.battery_present ? "YES" : "NO",
+                      snapshot.discharging ? "YES" : "NO",
+                      snapshot.vbus_good ? "YES" : "NO",
+                      snapshot.vbus_in ? "YES" : "NO",
+                      (unsigned)snapshot.vbus_mv);
+        return false;
+    }
+
+    Serial.printf("POWER: sleep mode 2 allowed phase=%s battery_present=%s discharging=%s vbus_good=%s vbus_in=%s vbus_mv=%u\n",
+                  phase,
+                  snapshot.battery_present ? "YES" : "NO",
+                  snapshot.discharging ? "YES" : "NO",
+                  snapshot.vbus_good ? "YES" : "NO",
+                  snapshot.vbus_in ? "YES" : "NO",
+                  (unsigned)snapshot.vbus_mv);
+    return true;
+}
+
 static void enter_deep_sleep_until(uint32_t sleep_seconds)
 {
     if (sleep_seconds < 60)
         sleep_seconds = 60;
 
-    Serial.printf("POWER: entering deep sleep for %lu seconds\n", (unsigned long)sleep_seconds);
+    const char *reason = deep_sleep_reason();
+    Serial.printf("POWER: entering deep sleep for %lu seconds reason=%s\n",
+                  (unsigned long)sleep_seconds,
+                  reason);
     sdcard_append_log("/power.log", String("{\"event\":\"deep_sleep_enter\",\"seconds\":") +
                                       String((unsigned long)sleep_seconds) +
-                                      String(",\"reason\":\"scheduled_night_window\"}\n"));
-    Serial.flush();
-
+                                      String(",\"reason\":\"") +
+                                      String(reason) +
+                                      String("\"}\n"));
+    gv2_prepare_for_sleep(g_config.uart);
     modem_prepare_for_sleep();
+    Serial.flush();
     esp_sleep_enable_timer_wakeup((uint64_t)sleep_seconds * 1000000ULL);
     esp_deep_sleep_start();
 }
@@ -152,9 +216,13 @@ static void sleep_if_in_configured_window(const char *phase)
     if (!is_hour_in_sleep_window((uint8_t)tm.tm_hour, g_config.power))
         return;
 
+    if (!deep_sleep_power_condition_allows(phase))
+        return;
+
     uint32_t sleep_seconds = seconds_until_sleep_window_end(tm, g_config.power);
-    Serial.printf("POWER: sleep window active phase=%s now=%02d:%02d:%02d window=%02u:00-%02u:00\n",
+    Serial.printf("POWER: sleep window active phase=%s mode=%u now=%02d:%02d:%02d window=%02u:00-%02u:00\n",
                   phase,
+                  g_config.power.deep_sleep,
                   tm.tm_hour,
                   tm.tm_min,
                   tm.tm_sec,
@@ -597,6 +665,7 @@ void setup()
     Serial.begin(115200);
     wait_for_serial(5000);
     delay(100);
+    gv2_power_on();
 
     print_system_info();
 
@@ -648,13 +717,13 @@ void setup()
     }
     Serial.flush();
 
+    g_post.power = power_init(g_config.power);
+    print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
+
     sleep_if_in_configured_window("post_time_sync");
 
     bool web_started = web_init(g_config.web);
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
-
-    g_post.power = power_init(g_config.power);
-    print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
 
     stepper_init(g_config.stepper);
     stepper_run_post_test_cycle();

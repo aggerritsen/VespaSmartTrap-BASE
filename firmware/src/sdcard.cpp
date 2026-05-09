@@ -54,7 +54,7 @@ static const char *DEFAULT_CONFIG =
     "  },\n"
     "  \"power\": {\n"
     "    \"log_interval_seconds\": 60,\n"
-    "    \"deep_sleep\": 1,\n"
+    "    \"deep_sleep\": 2,\n"
     "    \"deep_sleep_start_hour\": 18,\n"
     "    \"deep_sleep_end_hour\": 6\n"
     "  },\n"
@@ -203,7 +203,7 @@ static bool ensure_config_defaults(JsonDocument &doc)
 
     JsonObject power = ensure_object(doc, "power", changed);
     changed |= ensure_uint(power, "log_interval_seconds", 60);
-    changed |= ensure_uint(power, "deep_sleep", 1);
+    changed |= ensure_uint(power, "deep_sleep", 2);
     changed |= ensure_uint(power, "deep_sleep_start_hour", 18);
     changed |= ensure_uint(power, "deep_sleep_end_hour", 6);
 
@@ -496,7 +496,8 @@ bool sdcard_load_config(BaseConfig &config)
         config.power.log_interval_seconds = 60;
     if (config.power.log_interval_seconds > 86400)
         config.power.log_interval_seconds = 86400;
-    config.power.deep_sleep = config.power.deep_sleep ? 1 : 0;
+    if (config.power.deep_sleep > 2)
+        config.power.deep_sleep = 0;
     if (config.power.deep_sleep_start_hour > 23)
         config.power.deep_sleep_start_hour = 18;
     if (config.power.deep_sleep_end_hour > 23)
@@ -504,7 +505,7 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.power.deep_sleep_start_hour == config.power.deep_sleep_end_hour)
         config.power.deep_sleep = 0;
 
-    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep=%s power_sleep_window=%02u:00-%02u:00 time_network_timeout_seconds=%u time_gnss_fallback=%s\n",
+    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 time_network_timeout_seconds=%u time_gnss_fallback=%s\n",
                   config.device_name,
                   config.uart.rx_gpio,
                   config.uart.tx_gpio,
@@ -520,7 +521,7 @@ bool sdcard_load_config(BaseConfig &config)
                   config.web.mode,
                   config.web.ssid,
                   (unsigned long)config.power.log_interval_seconds,
-                  config.power.deep_sleep ? "YES" : "NO",
+                  config.power.deep_sleep,
                   config.power.deep_sleep_start_hour,
                   config.power.deep_sleep_end_hour,
                   config.time.network_timeout_seconds,

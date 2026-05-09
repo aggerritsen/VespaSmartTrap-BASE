@@ -32,7 +32,7 @@
   },
   "power": {
     "log_interval_seconds": 60,
-    "deep_sleep": 1,
+    "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6
   },

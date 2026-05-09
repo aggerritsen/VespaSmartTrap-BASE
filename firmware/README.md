@@ -36,6 +36,7 @@ For more board details, see the [LilyGO T-SIM7080G repository](https://github.co
 | GV2 UART RX | GPIO 16 default, Serial2 RX | Configurable via `/config.json` |
 | GV2 UART TX | GPIO 17 default, Serial2 TX | Configurable via `/config.json` |
 | GV2 UART baud | 921600 | 32 KB RX buffer for larger 4X JPEG bursts |
+| GV2 power enable | GPIO 43 default | Drives the external BC337 low-side switch control: HIGH while awake, LOW before deep sleep |
 | Modem RX | GPIO 4, Serial1 RX | SIM7080 AT interface |
 | Modem TX | GPIO 5, Serial1 TX | SIM7080 AT interface |
 | Modem PWRKEY | GPIO 41 | Pulsed if AT does not respond |
@@ -65,7 +66,7 @@ On startup, `setup()` performs:
 6. Enables modem network time commands and waits for registration.
 7. Reads `AT+CCLK?` into `YYYYMMDD_HHMMSS` format and sets system time if valid.
 8. Powers GNSS with `AT+CGNSPWR=1` and samples `AT+CGNSINF` for up to 10 seconds.
-9. If configured local time is inside the deep-sleep window, shuts down modem/GNSS rails and enters ESP32 deep sleep until the configured wake hour.
+9. If configured local time is inside the deep-sleep window, stops the GV2 UART, sets the GV2 UART pins high-Z, drives the GV2 power-enable GPIO LOW, shuts down modem/GNSS rails, and enters ESP32 deep sleep until the configured wake hour.
 10. Starts the WiFi web service when enabled in config.
 11. Initializes power telemetry.
 12. Initializes the TB6612FNG stepper output.
@@ -164,6 +165,8 @@ UART pins can also be changed without rebuilding:
 }
 ```
 
+GV2 power switching is controlled at build time with `GV2_POWER_GPIO_CFG`, defaulting to GPIO 43 in `platformio.ini`. The pin is driven HIGH during boot/wake before the GV2 UART starts, and driven LOW immediately before deep sleep after the UART is stopped and its RX/TX pins are set to input/high-Z.
+
 The web service is enabled as an access point by default. `mode` is `0` off, `1` WiFi station, or `2` access point:
 
 ```json
@@ -183,14 +186,22 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 {
   "power": {
     "log_interval_seconds": 60,
-    "deep_sleep": 1,
+    "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6
   }
 }
 ```
 
-`deep_sleep` is a `0`/`1` switch. When it is `1`, the base enters ESP32 deep sleep during the configured local-time window and wakes at `deep_sleep_end_hour`. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night will go back to sleep immediately. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup.
+`deep_sleep` is a mode value:
+
+| Mode | Behavior |
+| --- | --- |
+| `0` | Deep sleep disabled |
+| `1` | Sleep during the configured local-time window |
+| `2` | Sleep during the configured local-time window only when running from battery |
+
+Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, powers down the GV2 through GPIO 43, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup.
 
 During POST, missing `/config.json` fields are added back to the SD card with defaults without overwriting existing values. That includes `power.deep_sleep*` fields. Legacy GV2 reset settings and old comment helper fields are removed when the config is rewritten.
 
@@ -222,8 +233,8 @@ cd firmware
 | `src/sdcard.h` | SD card API |
 | `src/stepper.cpp` | TB6612FNG full-step actuator drive using config speed/rotation |
 | `src/stepper.h` | Stepper API |
-| `src/uart.cpp` | GV2 Serial2 binary `VSTS`/`VSTJ` receiver and JPEG streaming |
-| `src/uart.h` | GV2 UART API and receive statistics |
+| `src/uart.cpp` | GV2 power control, Serial2 binary `VSTS`/`VSTJ` receiver, and JPEG streaming |
+| `src/uart.h` | GV2 power/UART API and receive statistics |
 | `src/web.cpp` | WiFi HTTP service serving latest JPEG, overlay page, and inference JSON |
 | `src/web.h` | Web service API and published frame metadata |
 | `src/version.h` | Software name and version used in POST and frame logs |
