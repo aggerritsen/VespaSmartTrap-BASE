@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "device_name": "vst-base-001",
+  "uart": {
+    "rx_gpio": 16,
+    "tx_gpio": 17,
+    "baud": 921600
+  },
+  "logging": {
+    "post_log": "/post.log",
+    "image_prefix": "/frame_"
+  },
+  "features": {
+    "gnss_probe": true,
+    "ack_frames": true
+  },
+  "time": {
+    "network_timeout_seconds": 10,
+    "allow_gnss_fallback": true
+  },
+  "stepper": {
+    "speed_steps_per_second": 400,
+    "rotation_degrees": 90,
+    "steps_per_revolution": 2048,
+    "reverse_wait_ms": 1000,
+    "start_direction": "ccw"
+  },
+  "inference": {
+    "confidence_threshold": 0.89,
+    "detected_class": 3,
+    "occurrence": 3
+  },
+  "power": {
+    "log_interval_seconds": 60,
+    "deep_sleep": 1,
+    "deep_sleep_start_hour": 18,
+    "deep_sleep_end_hour": 6
+  },
+  "web": {
+    "mode": 2,
+    "ssid": "VST-BASE",
+    "password": "",
+    "append_mac": true
+  }
+}

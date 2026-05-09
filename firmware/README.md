@@ -129,6 +129,8 @@ The firmware writes:
 
 `/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `src/version.h`. `/frames.log` is appended as JSON Lines. JPEG filenames use the known system timestamp plus a local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
 
+The repository includes `config.example.json` as a clean, human-readable baseline for validating SD card configs. It intentionally contains no comment helper fields and no legacy GV2 reset settings.
+
 Each `/frames.log` line records timestamp, GNSS coordinates, inference state/class/confidence, configured inference filter, occurrence count, detection match result, bounding box, JPEG length, CRC, saved filename, current actuator settings, actuator activation result, device name, CPU make/model, and software version.
 
 The stepper settings currently used are:
@@ -140,8 +142,7 @@ The stepper settings currently used are:
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
     "reverse_wait_ms": 1000,
-    "start_direction": "clockwise",
-    "_start_direction_comment": "Use clockwise/cw or anti-clockwise/ccw"
+    "start_direction": "clockwise"
   },
   "inference": {
     "confidence_threshold": 0.0,
@@ -191,7 +192,7 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 
 `deep_sleep` is a `0`/`1` switch. When it is `1`, the base enters ESP32 deep sleep during the configured local-time window and wakes at `deep_sleep_end_hour`. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night will go back to sleep immediately. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup.
 
-During POST, missing `/config.json` fields are added back to the SD card with defaults without overwriting existing values. That includes `power.deep_sleep*` fields.
+During POST, missing `/config.json` fields are added back to the SD card with defaults without overwriting existing values. That includes `power.deep_sleep*` fields. Legacy GV2 reset settings and old comment helper fields are removed when the config is rewritten.
 
 When enabled, open the IP printed as `WEB: ... ip=...` in the serial monitor. The page polls `/state.json` for inference metadata and fetches `/frame.jpg` only when a new verified frame id arrives, keeping the display path binary JPEG instead of base64. CRC-bad or structurally invalid JPEGs are logged but do not replace the last good web frame.
 

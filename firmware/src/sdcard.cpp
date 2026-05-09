@@ -131,9 +131,37 @@ static bool ensure_bool(JsonObject obj, const char *name, bool value)
     return true;
 }
 
-static bool ensure_config_defaults(JsonDocument &doc)
+static bool remove_key(JsonObject obj, const char *name)
+{
+    if (obj[name].isNull())
+        return false;
+
+    obj.remove(name);
+    return true;
+}
+
+static bool remove_legacy_config_fields(JsonDocument &doc)
 {
     bool changed = false;
+    JsonObject root = doc.as<JsonObject>();
+
+    changed |= remove_key(root, "gv2");
+    changed |= remove_key(root, "_comment");
+
+    JsonObject stepper = root["stepper"];
+    if (!stepper.isNull())
+        changed |= remove_key(stepper, "_start_direction_comment");
+
+    JsonObject power = root["power"];
+    if (!power.isNull())
+        changed |= remove_key(power, "_log_interval_comment");
+
+    return changed;
+}
+
+static bool ensure_config_defaults(JsonDocument &doc)
+{
+    bool changed = remove_legacy_config_fields(doc);
 
     if (doc["schema_version"].isNull()) {
         doc["schema_version"] = 1;
