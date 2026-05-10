@@ -234,3 +234,11 @@ void stepper_run_post_test_cycle()
     bool ok = stepper_run_configured_cycle();
     Serial.printf("STEPPER: POST test cycle %s\n", ok ? "done" : "skipped");
 }
+
+void stepper_set_status_led(bool active)
+{
+    if (!g_stepper_ready)
+        return;
+
+    set_right_led(active);
+}

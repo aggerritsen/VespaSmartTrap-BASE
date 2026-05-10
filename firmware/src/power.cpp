@@ -119,7 +119,7 @@ bool power_init(const PowerConfig &config)
 {
     g_power_config = config;
     if (g_power_config.log_interval_seconds == 0)
-        g_power_config.log_interval_seconds = 60;
+        g_power_config.log_interval_seconds = 900;
 
     Wire.begin(PMU_I2C_SDA, PMU_I2C_SCL);
     Wire.setClock(400000);

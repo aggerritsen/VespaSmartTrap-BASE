@@ -28,8 +28,18 @@ struct WebConfig {
     bool append_mac = true;
 };
 
+struct LoggingConfig {
+    char post_log[33] = "/post.log";
+    char image_prefix[33] = "/frame_";
+};
+
+struct FeaturesConfig {
+    bool gnss_probe = true;
+    bool ack_frames = true;
+};
+
 struct PowerConfig {
-    uint32_t log_interval_seconds = 60;
+    uint32_t log_interval_seconds = 900;
     uint8_t deep_sleep = 2;
     uint8_t deep_sleep_start_hour = 18;
     uint8_t deep_sleep_end_hour = 6;
@@ -40,14 +50,29 @@ struct TimeConfig {
     bool allow_gnss_fallback = true;
 };
 
+struct ModemConfig {
+    uint8_t mode = 1; // 0=no modem, 1=time only, 2=LTE-M validated
+    char apn[33] = "internet.m2m";
+    char lookup_primary[16] = "1.1.1.1";
+    char lookup_secondary[16] = "8.8.8.8";
+};
+
+struct HealthConfig {
+    uint8_t led = 1; // 0=off, 1=blink health state on status LED
+};
+
 struct BaseConfig {
     char device_name[32] = "vst-base";
     UartConfig uart;
+    LoggingConfig logging;
+    FeaturesConfig features;
     StepperConfig stepper;
     InferenceConfig inference;
     WebConfig web;
     PowerConfig power;
     TimeConfig time;
+    ModemConfig modem;
+    HealthConfig health;
 };
 
 bool sdcard_init();

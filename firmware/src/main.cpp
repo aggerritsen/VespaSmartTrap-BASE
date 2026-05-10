@@ -18,6 +18,9 @@ static char g_timestamp[32] = {0};
 
 struct PostResult {
     bool modem_ready = false;
+    bool modem_network = false;
+    bool modem_ltem = false;
+    bool modem_http = false;
     bool modem_time = false;
     bool gnss_time = false;
     bool system_time = false;
@@ -209,6 +212,16 @@ static void sleep_if_in_configured_window(const char *phase)
 
     struct tm tm{};
     if (!current_local_time(tm)) {
+        static uint32_t last_loop_no_time_log_ms = 0;
+        if (phase && strcmp(phase, "loop") == 0) {
+            uint32_t now_ms = millis();
+            uint32_t interval_ms = g_config.power.log_interval_seconds * 1000UL;
+            if (interval_ms == 0)
+                interval_ms = 60000UL;
+            if (last_loop_no_time_log_ms != 0 && now_ms - last_loop_no_time_log_ms < interval_ms)
+                return;
+            last_loop_no_time_log_ms = now_ms;
+        }
         Serial.printf("POWER: sleep schedule skipped phase=%s reason=no_valid_system_time\n", phase);
         return;
     }
@@ -248,6 +261,18 @@ static String make_post_summary_text()
     s += "\n";
     s += "device_name=";
     s += g_config.device_name;
+    s += "\n";
+    s += "post_log=";
+    s += g_config.logging.post_log;
+    s += "\n";
+    s += "image_prefix=";
+    s += g_config.logging.image_prefix;
+    s += "\n";
+    s += "feature_gnss_probe=";
+    s += g_config.features.gnss_probe ? "YES" : "NO";
+    s += "\n";
+    s += "feature_ack_frames=";
+    s += g_config.features.ack_frames ? "YES" : "NO";
     s += "\n";
     s += "log_policy=overwrite_at_boot\n";
     s += "timestamp_compact=";
@@ -310,10 +335,28 @@ static String make_post_summary_text()
     s += g_config.uart.tx_gpio;
     s += " baud=";
     s += g_config.uart.baud;
-    s += " protocol=VSTJ/VSTS+CRC32";
+    s += " protocol=VSTJ/VSTS/VSTH/VSTE+CRC32";
     s += "\n";
     s += "modem_at=";
     s += g_post.modem_ready ? "PASS" : "FAIL";
+    s += "\n";
+    s += "modem_mode=";
+    s += g_config.modem.mode;
+    s += "\n";
+    s += "modem_apn=";
+    s += g_config.modem.apn;
+    s += "\n";
+    s += "modem_ltem=";
+    s += g_post.modem_ltem ? "PASS" : (g_config.modem.mode == 2 ? "FAIL" : "SKIPPED");
+    s += "\n";
+    s += "modem_http_world_clock=";
+    s += g_post.modem_http ? "PASS" : (g_config.modem.mode == 2 ? "FAIL" : "SKIPPED");
+    s += "\n";
+    s += "modem_lookup_primary=";
+    s += g_config.modem.lookup_primary;
+    s += "\n";
+    s += "modem_lookup_secondary=";
+    s += g_config.modem.lookup_secondary;
     s += "\n";
     s += "modem_timestamp=";
     s += g_post.modem_time ? "PASS " : "FAIL ";
@@ -414,6 +457,9 @@ static String make_post_summary_text()
     s += "power_log_interval_seconds=";
     s += g_config.power.log_interval_seconds;
     s += "\n";
+    s += "health_led=";
+    s += g_config.health.led;
+    s += "\n";
     s += "power_deep_sleep=";
     s += g_config.power.deep_sleep;
     s += "\n";
@@ -471,9 +517,20 @@ static void print_post_summary()
     Serial.println("==================================================");
     Serial.printf("POST: software_version  [%s]\n", VST_BASE_SOFTWARE_VERSION);
     Serial.printf("POST: device_name       [%s]\n", g_config.device_name);
+    Serial.printf("POST: post_log          [%s]\n", g_config.logging.post_log);
+    Serial.printf("POST: image_prefix      [%s]\n", g_config.logging.image_prefix);
+    Serial.printf("POST: features          [gnss_probe=%s ack_frames=%s]\n",
+                  g_config.features.gnss_probe ? "YES" : "NO",
+                  g_config.features.ack_frames ? "YES" : "NO");
     Serial.printf("POST: stepper_wait_ms   [%u]\n", g_config.stepper.reverse_wait_ms);
     Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
     Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
+    Serial.printf("POST: health_led       [%u]\n", g_config.health.led);
+    Serial.printf("POST: modem_mode      [%u] apn=[%s] lookup=[%s,%s]\n",
+                  g_config.modem.mode,
+                  g_config.modem.apn,
+                  g_config.modem.lookup_primary,
+                  g_config.modem.lookup_secondary);
     Serial.printf("POST: deep_sleep       [%u %02u:00-%02u:00]\n",
                   g_config.power.deep_sleep,
                   g_config.power.deep_sleep_start_hour,
@@ -483,6 +540,12 @@ static void print_post_summary()
                   g_config.inference.confidence_threshold,
                   g_config.inference.occurrence);
     print_post_line("modem_at", g_post.modem_ready);
+    if (g_config.modem.mode == 2)
+        print_post_line("modem_ltem", g_post.modem_ltem, g_post.modem_ltem ? "bearer/ip validated" : "attach failed");
+    else
+        print_post_warn("modem_ltem", g_config.modem.mode == 0 ? "skipped mode=0" : "skipped mode=1");
+    if (g_config.modem.mode == 2)
+        print_post_line("modem_http", g_post.modem_http, g_post.modem_http ? "world clock OK" : "world clock failed");
     print_post_line("modem_timestamp", g_post.modem_time, g_post.modem_time ? g_timestamp : "no valid network time");
     print_post_line("gnss_timestamp", g_post.gnss_time, g_post.gnss_time ? g_timestamp : "unavailable");
     print_post_line("system_time", g_post.system_time);
@@ -492,11 +555,12 @@ static void print_post_summary()
     else
         print_post_warn("gnss_fix", g_gnss.fix ? "raw fix rejected" : "no fix yet");
     if (g_post.gnss_ready) {
-        Serial.printf("POST: gnss_powered=%s raw_fix=%s valid=%s utc=%s lat=%s lon=%s sats=%s\n",
+        Serial.printf("POST: gnss_powered=%s raw_fix=%s valid=%s utc=%s utc_advancing=%s lat=%s lon=%s sats=%s\n",
                       g_gnss.powered ? "YES" : "NO",
                       g_gnss.fix ? "YES" : "NO",
                       g_gnss.position_valid ? "YES" : "NO",
                       g_gnss.utc[0] ? g_gnss.utc : "-",
+                      g_gnss.utc_advancing ? "YES" : "NO",
                       g_gnss.latitude[0] ? g_gnss.latitude : "-",
                       g_gnss.longitude[0] ? g_gnss.longitude : "-",
                       g_gnss.satellites[0] ? g_gnss.satellites : "-");
@@ -517,8 +581,8 @@ static void write_post_summary_to_sd()
         return;
 
     String summary = make_post_summary_text();
-    bool ok = sdcard_write_log("/post.log", summary);
-    print_post_line("sd_post_log", ok, ok ? "/post.log" : "write failed");
+    bool ok = sdcard_write_log(g_config.logging.post_log, summary);
+    print_post_line("sd_post_log", ok, ok ? g_config.logging.post_log : "write failed");
 }
 
 static bool is_digit(char c)
@@ -609,22 +673,313 @@ static bool gnss_utc_to_timestamp(const char *utc, char *out, size_t out_len)
     return true;
 }
 
-static bool print_idle_heartbeat()
+static bool apply_gnss_time_if_usable(const char *phase, bool post_style_log)
+{
+    if (!g_config.time.allow_gnss_fallback || g_post.system_time)
+        return g_post.system_time;
+
+    if (!g_config.features.gnss_probe)
+        return false;
+
+    if (g_config.modem.mode == 0 || !g_post.modem_ready)
+        return false;
+
+    Serial.printf("%s: GNSS time fallback probe begin\n", phase);
+    g_post.gnss_ready = modem_gnss_probe(g_gnss, 10000);
+    g_post.gnss_fix = g_gnss.position_valid;
+
+    if (post_style_log) {
+        print_post_line("gnss_command", g_post.gnss_ready, g_post.gnss_ready ? "AT+CGNSPWR/AT+CGNSINF" : "unavailable");
+        if (g_post.gnss_fix)
+            print_post_line("gnss_fix", true, "position fix");
+        else
+            print_post_warn("gnss_fix", g_gnss.fix ? "raw fix rejected" : "no fix yet");
+    }
+
+    char gnss_timestamp[32] = {0};
+    bool gnss_time_usable = (g_gnss.position_valid || g_gnss.utc_advancing) &&
+                            gnss_utc_to_timestamp(g_gnss.utc, gnss_timestamp, sizeof(gnss_timestamp));
+    if (!gnss_time_usable) {
+        const char *reason = g_gnss.utc_valid ? "GNSS UTC stale/no fix" : "trusted GNSS time unavailable";
+        if (post_style_log)
+            print_post_warn("gnss_timestamp", reason);
+        else
+            Serial.printf("%s: GNSS timestamp unavailable reason=%s\n", phase, reason);
+        return false;
+    }
+
+    strlcpy(g_timestamp, gnss_timestamp, sizeof(g_timestamp));
+    g_post.gnss_time = true;
+    g_post.system_time = set_system_time_from_timestamp(g_timestamp);
+    if (post_style_log)
+        print_post_line("gnss_timestamp", g_post.system_time, g_post.system_time ? g_timestamp : "invalid");
+    else
+        Serial.printf("%s: GNSS timestamp recovered [%s]\n", phase, g_timestamp);
+    return g_post.system_time;
+}
+
+struct HealthState {
+    bool has_error = false;
+    bool no_uart_comm = true;
+    bool no_inference_detection = true;
+    bool gv2_camera_error = false;
+    bool no_sim_connect = false;
+    bool no_sd = true;
+    bool low_power = false;
+    bool power_valid = false;
+    PowerSnapshot power;
+    uint32_t last_diagnosis_ms = 0;
+    uint32_t last_bytes = 0;
+    uint32_t last_jpegs = 0;
+    uint32_t last_state_frames = 0;
+    uint32_t last_heartbeat_frames = 0;
+    uint32_t last_error_frames = 0;
+};
+
+static HealthState g_health;
+
+static const char *yn(bool value)
+{
+    return value ? "YES" : "NO";
+}
+
+static void append_json_string(String &s, const char *name, const char *value)
+{
+    s += "\"";
+    s += name;
+    s += "\":\"";
+    if (value) {
+        for (const char *p = value; *p; p++) {
+            if (*p == '"' || *p == '\\')
+                s += '\\';
+            s += *p;
+        }
+    }
+    s += "\"";
+}
+
+static void append_json_bool(String &s, const char *name, bool value)
+{
+    s += "\"";
+    s += name;
+    s += "\":";
+    s += value ? "true" : "false";
+}
+
+static bool modem_health_ok()
+{
+    if (g_config.modem.mode == 0)
+        return true;
+    if (!g_post.modem_ready)
+        return false;
+    if (g_config.modem.mode == 1)
+        return g_post.modem_network && g_post.modem_time && g_post.system_time;
+    return g_post.modem_network && g_post.modem_ltem;
+}
+
+static void refresh_modem_health()
+{
+    if (g_config.modem.mode == 0)
+        return;
+
+    if (!g_post.modem_ready) {
+        Serial.println("MODEM: health recovery init begin");
+        g_post.modem_ready = modem_init_early();
+        if (!g_post.modem_ready)
+            return;
+    }
+
+    uint32_t network_timeout_ms = (uint32_t)g_config.time.network_timeout_seconds * 1000UL;
+    if (network_timeout_ms == 0)
+        network_timeout_ms = 10000UL;
+
+    bool registered = modem_check_network_registered(min<uint32_t>(network_timeout_ms, 5000UL));
+    if (!registered) {
+        Serial.println("MODEM: health network registration timeout");
+        modem_print_sim_network_status();
+        if (g_post.modem_network) {
+            Serial.println("MODEM: health network registration LOST");
+            g_post.modem_time = false;
+        }
+        g_post.modem_network = false;
+        if (!g_post.system_time)
+            apply_gnss_time_if_usable("HEALTH", false);
+        return;
+    }
+
+    bool network_recovered = !g_post.modem_network;
+    if (network_recovered)
+        Serial.println("MODEM: health network registration OK");
+    g_post.modem_network = true;
+
+    if (g_config.modem.mode == 1 && (network_recovered || !g_post.modem_time || !g_post.system_time)) {
+        Serial.println("MODEM: health timestamp retry begin");
+        if (modem_get_timestamp(g_timestamp, sizeof(g_timestamp), network_timeout_ms)) {
+            g_post.modem_time = true;
+            g_post.system_time = set_system_time_from_timestamp(g_timestamp);
+            Serial.printf("MODEM: health timestamp recovered [%s]\n", g_timestamp);
+        } else if (network_recovered) {
+            g_post.modem_time = false;
+            Serial.println("MODEM: health timestamp recovery FAILED");
+        }
+    } else if (g_config.modem.mode == 2 && !g_post.modem_ltem) {
+        Serial.println("MODEM: health LTE-M retry begin");
+        g_post.modem_ltem = modem_validate_ltem(g_config.modem.apn,
+                                                g_config.modem.lookup_primary,
+                                                g_config.modem.lookup_secondary,
+                                                network_timeout_ms);
+    }
+
+    if (!g_post.system_time)
+        apply_gnss_time_if_usable("HEALTH", false);
+}
+
+static void append_health_errors_json(String &s)
+{
+    bool first = true;
+    auto add_error = [&](const char *name) {
+        if (!first)
+            s += ",";
+        s += "\"";
+        for (const char *p = name; *p; p++) {
+            if (*p == '"' || *p == '\\')
+                s += '\\';
+            s += *p;
+        }
+        s += "\"";
+        first = false;
+    };
+
+    s += "\"errors\":[";
+    if (g_health.no_uart_comm)
+        add_error("no_uart_comm");
+    if (g_health.no_inference_detection)
+        add_error("no_inference_detection");
+    if (g_health.gv2_camera_error)
+        add_error("gv2_camera_error");
+    if (g_health.no_sim_connect)
+        add_error("no_sim_connect");
+    if (g_health.no_sd)
+        add_error("no_sd");
+    if (g_health.low_power)
+        add_error("low_power");
+    s += "]";
+}
+
+static String make_health_log_line(uint32_t now,
+                                   uint32_t delta_bytes,
+                                   uint32_t delta_jpegs,
+                                   uint32_t delta_state,
+                                   uint32_t delta_heartbeats,
+                                   uint32_t delta_errors,
+                                   const Gv2UartStats &uart_stats)
+{
+    String s;
+    s.reserve(1500);
+    s += "{";
+    append_json_string(s, "type", "health");
+    s += ",";
+    append_json_string(s, "timestamp", (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "");
+    s += ",\"uptime_ms\":";
+    s += (unsigned long)now;
+    s += ",";
+    append_json_string(s, "state", g_health.has_error ? "ERROR" : "OK");
+    s += ",";
+    append_health_errors_json(s);
+    s += ",\"delta\":{\"gv2_bytes\":";
+    s += (unsigned long)delta_bytes;
+    s += ",\"gv2_jpegs\":";
+    s += (unsigned long)delta_jpegs;
+    s += ",\"gv2_state\":";
+    s += (unsigned long)delta_state;
+    s += ",\"gv2_heartbeats\":";
+    s += (unsigned long)delta_heartbeats;
+    s += ",\"gv2_errors\":";
+    s += (unsigned long)delta_errors;
+    s += "},\"gv2\":{\"bytes\":";
+    s += (unsigned long)uart_stats.bytes;
+    s += ",\"jpegs\":";
+    s += (unsigned long)uart_stats.jpeg_frames;
+    s += ",\"state_frames\":";
+    s += (unsigned long)uart_stats.state_frames;
+    s += ",\"heartbeats\":";
+    s += (unsigned long)uart_stats.heartbeat_frames;
+    s += ",\"heartbeat_status\":";
+    s += (unsigned)uart_stats.last_heartbeat_status;
+    s += ",\"heartbeat_counter\":";
+    s += (unsigned long)uart_stats.last_heartbeat_counter;
+    s += ",\"errors\":";
+    s += (unsigned long)uart_stats.error_frames;
+    s += ",\"last_error_code\":";
+    s += (unsigned)uart_stats.last_error_code;
+    s += ",\"last_error_detail\":";
+    s += (unsigned)uart_stats.last_error_detail;
+    s += "},\"modem\":{";
+    append_json_bool(s, "ok", modem_health_ok());
+    s += ",\"mode\":";
+    s += (unsigned)g_config.modem.mode;
+    s += ",";
+    append_json_bool(s, "at", g_post.modem_ready);
+    s += ",";
+    append_json_bool(s, "network", g_post.modem_network);
+    s += ",";
+    append_json_bool(s, "ltem", g_post.modem_ltem);
+    s += ",";
+    append_json_bool(s, "time", g_post.modem_time);
+    s += "},\"time\":{";
+    append_json_bool(s, "system", g_post.system_time);
+    s += ",";
+    append_json_string(s, "compact", (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "");
+    s += "},\"gnss\":{";
+    append_json_bool(s, "ok", g_post.gnss_ready);
+    s += ",";
+    append_json_bool(s, "fix", g_post.gnss_fix);
+    s += ",";
+    append_json_bool(s, "utc_advancing", g_gnss.utc_advancing);
+    s += ",";
+    append_json_string(s, "utc", g_gnss.utc);
+    s += "},\"io\":{";
+    append_json_bool(s, "uart", g_post.gv2_uart);
+    s += ",";
+    append_json_bool(s, "sd", sdcard_available());
+    s += ",\"health_led\":";
+    s += (unsigned)g_config.health.led;
+    s += "},\"power\":{";
+    append_json_bool(s, "valid", g_health.power_valid);
+    s += ",";
+    append_json_bool(s, "low_power", g_health.low_power);
+    s += ",\"battery_percent\":";
+    s += g_health.power_valid ? g_health.power.battery_percent : -1;
+    s += ",\"battery_mv\":";
+    s += g_health.power_valid ? (unsigned)g_health.power.battery_mv : 0;
+    s += ",\"vbus_mv\":";
+    s += g_health.power_valid ? (unsigned)g_health.power.vbus_mv : 0;
+    s += "},\"heap_free\":";
+    s += ESP.getFreeHeap();
+    s += "}\n";
+    return s;
+}
+
+static bool diagnose_and_print_health()
 {
     static bool serial_post_copy_printed = false;
     static uint32_t last_ms = 0;
+    static uint32_t diagnosis_count = 0;
     uint32_t now = millis();
-    uint32_t interval_ms = g_config.power.log_interval_seconds * 1000UL;
+    constexpr uint32_t interval_ms = 60000UL;
 
-    if (interval_ms == 0)
-        interval_ms = 60000UL;
+    if (last_ms == 0) {
+        last_ms = now;
+        return false;
+    }
 
     if (now - last_ms < interval_ms)
         return false;
 
     last_ms = now;
+    diagnosis_count++;
 
-    if (!serial_post_copy_printed) {
+    if (!serial_post_copy_printed && diagnosis_count > 1) {
         serial_post_copy_printed = true;
         Serial.println();
         Serial.println("POST MONITOR COPY: delayed once so COM5 can attach");
@@ -633,21 +988,98 @@ static bool print_idle_heartbeat()
     }
 
     const Gv2UartStats &uart_stats = gv2_uart_stats();
-    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu gv2_errors=%lu gv2_last_error=%u/%u heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s\n",
+    uint32_t delta_bytes = uart_stats.bytes - g_health.last_bytes;
+    uint32_t delta_jpegs = uart_stats.jpeg_frames - g_health.last_jpegs;
+    uint32_t delta_state = uart_stats.state_frames - g_health.last_state_frames;
+    uint32_t delta_heartbeats = uart_stats.heartbeat_frames - g_health.last_heartbeat_frames;
+    uint32_t delta_errors = uart_stats.error_frames - g_health.last_error_frames;
+
+    if (uart_stats.camera_error_active && delta_errors == 0 && (delta_jpegs > 0 || delta_state > 0 || delta_heartbeats > 0)) {
+        gv2_uart_clear_camera_error();
+        Serial.println("HEALTH: gv2_camera_error cleared by recovered GV2 traffic");
+    }
+
+    refresh_modem_health();
+
+    g_health.no_uart_comm = !g_post.gv2_uart || delta_bytes == 0;
+    g_health.no_inference_detection = !g_health.no_uart_comm &&
+                                      delta_jpegs == 0 &&
+                                      delta_heartbeats == 0 &&
+                                      delta_state == 0;
+    g_health.gv2_camera_error = uart_stats.camera_error_active;
+    g_health.no_sim_connect = !modem_health_ok();
+    g_health.no_sd = !sdcard_available();
+    g_health.power_valid = power_read_snapshot(g_health.power);
+    g_health.low_power = false;
+    if (g_health.power_valid) {
+        bool external_power_present = g_health.power.vbus_good ||
+                                      g_health.power.vbus_in ||
+                                      g_health.power.vbus_mv > 4200;
+        g_health.low_power = g_health.power.battery_present &&
+                             !external_power_present &&
+                             ((g_health.power.battery_percent >= 0 && g_health.power.battery_percent <= 20) ||
+                              (g_health.power.battery_mv > 0 && g_health.power.battery_mv < 3500));
+    }
+
+    g_health.has_error = g_health.no_uart_comm ||
+                         g_health.no_inference_detection ||
+                         g_health.gv2_camera_error ||
+                         g_health.no_sim_connect ||
+                         g_health.no_sd ||
+                         g_health.low_power;
+    g_health.last_diagnosis_ms = now;
+    g_health.last_bytes = uart_stats.bytes;
+    g_health.last_jpegs = uart_stats.jpeg_frames;
+    g_health.last_state_frames = uart_stats.state_frames;
+    g_health.last_heartbeat_frames = uart_stats.heartbeat_frames;
+    g_health.last_error_frames = uart_stats.error_frames;
+
+    Serial.printf("HEALTH: ms=%lu state=%s errors=%s%s%s%s%s%s gv2_delta_bytes=%lu gv2_delta_jpegs=%lu gv2_delta_state=%lu gv2_delta_heartbeats=%lu gv2_delta_errors=%lu battery_pct=%d battery_mv=%u vbus_mv=%u\n",
+                  (unsigned long)now,
+                  g_health.has_error ? "ERROR" : "OK",
+                  g_health.no_uart_comm ? " no_uart_comm" : "",
+                  g_health.no_inference_detection ? " no_inference_detection" : "",
+                  g_health.gv2_camera_error ? " gv2_camera_error" : "",
+                  g_health.no_sim_connect ? " no_sim_connect" : "",
+                  g_health.no_sd ? " no_sd" : "",
+                  g_health.low_power ? " low_power" : "",
+                  (unsigned long)delta_bytes,
+                  (unsigned long)delta_jpegs,
+                  (unsigned long)delta_state,
+                  (unsigned long)delta_heartbeats,
+                  (unsigned long)delta_errors,
+                  g_health.power_valid ? g_health.power.battery_percent : -1,
+                  g_health.power_valid ? (unsigned)g_health.power.battery_mv : 0,
+                  g_health.power_valid ? (unsigned)g_health.power.vbus_mv : 0);
+
+    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu gv2_heartbeats=%lu gv2_heartbeat_status=%u/%lu gv2_errors=%lu gv2_last_error=%u/%u heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s health=%s low_power=%s\n",
                   (unsigned long)now,
                   (unsigned long)uart_stats.bytes,
                   (unsigned long)uart_stats.jpeg_frames,
                   (unsigned long)uart_stats.state_frames,
+                  (unsigned long)uart_stats.heartbeat_frames,
+                  (unsigned)uart_stats.last_heartbeat_status,
+                  (unsigned long)uart_stats.last_heartbeat_counter,
                   (unsigned long)uart_stats.error_frames,
                   (unsigned)uart_stats.last_error_code,
                   (unsigned)uart_stats.last_error_detail,
                   ESP.getFreeHeap(),
-                  g_post.modem_ready ? "OK" : "NO",
+                  modem_health_ok() ? "OK" : "NO",
                   (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "NO",
                   g_post.gnss_ready ? "OK" : "NO",
                   g_post.gnss_fix ? "YES" : "NO",
                   g_post.gv2_uart ? "OK" : "NO",
-                  sdcard_available() ? "OK" : "NO");
+                  sdcard_available() ? "OK" : "NO",
+                  g_health.has_error ? "ERROR" : "OK",
+                  yn(g_health.low_power));
+    sdcard_append_log("/health.log",
+                      make_health_log_line(now,
+                                           delta_bytes,
+                                           delta_jpegs,
+                                           delta_state,
+                                           delta_heartbeats,
+                                           delta_errors,
+                                           uart_stats));
     Serial.flush();
     return true;
 }
@@ -655,6 +1087,44 @@ static bool print_idle_heartbeat()
 static void print_power_after_heartbeat()
 {
     power_log_snapshot_when_due();
+}
+
+static void poll_status_led()
+{
+    static bool led_on = false;
+    static uint32_t cycle_start_ms = 0;
+    static bool last_error_state = false;
+
+    if (g_config.health.led == 0) {
+        if (led_on) {
+            led_on = false;
+            stepper_set_status_led(false);
+        }
+        return;
+    }
+
+    uint32_t now = millis();
+    bool error_state = g_health.has_error;
+    if (cycle_start_ms == 0 || error_state != last_error_state || now - cycle_start_ms >= 10000UL) {
+        cycle_start_ms = now;
+        last_error_state = error_state;
+    }
+
+    uint32_t phase = now - cycle_start_ms;
+    bool desired = false;
+
+    if (!error_state) {
+        desired = phase < 500UL;
+    } else {
+        desired = (phase < 120UL) ||
+                  (phase >= 240UL && phase < 360UL) ||
+                  (phase >= 480UL && phase < 600UL);
+    }
+
+    if (desired != led_on) {
+        led_on = desired;
+        stepper_set_status_led(led_on);
+    }
 }
 
 /* =========================================================
@@ -677,13 +1147,37 @@ void setup()
     bool config_loaded = sdcard_load_config(g_config);
     print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
 
-    Serial.println("POST: modem init begin");
-    if (modem_init_early()) {
+    if (g_config.modem.mode == 0) {
+        Serial.println("POST: modem skipped by config mode=0 (no SIM/no modem)");
+        print_post_warn("modem_at", "skipped mode=0");
+        print_post_warn("modem_timestamp", "skipped mode=0");
+        print_post_warn("gnss_command", "skipped mode=0");
+    } else {
+        Serial.printf("POST: modem init begin mode=%u\n", g_config.modem.mode);
+    }
+
+    if (g_config.modem.mode != 0 && modem_init_early()) {
         g_post.modem_ready = true;
         print_post_line("modem_at", true);
-        Serial.println("POST: modem timestamp begin; waiting for network time");
+
         uint32_t network_timeout_ms = (uint32_t)g_config.time.network_timeout_seconds * 1000UL;
+        if (g_config.modem.mode == 2) {
+            Serial.println("POST: LTE-M validation begin");
+            g_post.modem_ltem = modem_validate_ltem(g_config.modem.apn,
+                                                    g_config.modem.lookup_primary,
+                                                    g_config.modem.lookup_secondary,
+                                                    network_timeout_ms);
+            g_post.modem_network = g_post.modem_ltem;
+            print_post_line("modem_ltem", g_post.modem_ltem, g_post.modem_ltem ? "bearer/ip validated" : "attach failed");
+            if (g_post.modem_ltem) {
+                g_post.modem_http = modem_test_world_clock();
+                print_post_line("modem_http", g_post.modem_http, g_post.modem_http ? "world clock OK" : "world clock failed");
+            }
+        }
+
+        Serial.println("POST: modem timestamp begin; waiting for network time");
         if (modem_get_timestamp(g_timestamp, sizeof(g_timestamp), network_timeout_ms)) {
+            g_post.modem_network = true;
             g_post.modem_time = true;
             Serial.printf("POST: modem_timestamp [%s]\n", g_timestamp);
             g_post.system_time = set_system_time_from_timestamp(g_timestamp);
@@ -692,27 +1186,36 @@ void setup()
             print_post_line("modem_timestamp", false, "unavailable");
         }
 
-        Serial.println("POST: GNSS probe begin; sampling up to 10 seconds for fix");
-        g_post.gnss_ready = modem_gnss_probe(g_gnss, 10000);
-        g_post.gnss_fix = g_gnss.position_valid;
-        print_post_line("gnss_command", g_post.gnss_ready, g_post.gnss_ready ? "AT+CGNSPWR/AT+CGNSINF" : "unavailable");
-        if (g_post.gnss_fix)
-            print_post_line("gnss_fix", true, "position fix");
-        else
-            print_post_warn("gnss_fix", g_gnss.fix ? "raw fix rejected" : "no fix yet");
+        bool should_probe_gnss = g_config.features.gnss_probe &&
+                                 (g_config.modem.mode == 2 ||
+                                  (!g_post.system_time && g_config.time.allow_gnss_fallback));
+        if (should_probe_gnss) {
+            Serial.println("POST: GNSS probe begin; sampling up to 10 seconds for fix");
+            g_post.gnss_ready = modem_gnss_probe(g_gnss, 10000);
+            g_post.gnss_fix = g_gnss.position_valid;
+            print_post_line("gnss_command", g_post.gnss_ready, g_post.gnss_ready ? "AT+CGNSPWR/AT+CGNSINF" : "unavailable");
+            if (g_post.gnss_fix)
+                print_post_line("gnss_fix", true, "position fix");
+            else
+                print_post_warn("gnss_fix", g_gnss.fix ? "raw fix rejected" : "no fix yet");
+        } else {
+            print_post_warn("gnss_command", "skipped mode=1");
+        }
 
         if (!g_post.system_time && g_config.time.allow_gnss_fallback) {
             char gnss_timestamp[32] = {0};
-            if (g_gnss.position_valid && gnss_utc_to_timestamp(g_gnss.utc, gnss_timestamp, sizeof(gnss_timestamp))) {
+            bool gnss_time_usable = (g_gnss.position_valid || g_gnss.utc_advancing) &&
+                                    gnss_utc_to_timestamp(g_gnss.utc, gnss_timestamp, sizeof(gnss_timestamp));
+            if (gnss_time_usable) {
                 strlcpy(g_timestamp, gnss_timestamp, sizeof(g_timestamp));
                 g_post.gnss_time = true;
                 g_post.system_time = set_system_time_from_timestamp(g_timestamp);
                 print_post_line("gnss_timestamp", g_post.system_time, g_post.system_time ? g_timestamp : "invalid");
             } else {
-                print_post_warn("gnss_timestamp", g_gnss.position_valid ? "unavailable" : "trusted GNSS position unavailable");
+                print_post_warn("gnss_timestamp", g_gnss.utc_valid ? "GNSS UTC stale/no fix" : "trusted GNSS time unavailable");
             }
         }
-    } else {
+    } else if (g_config.modem.mode != 0) {
         print_post_line("modem_at", false);
     }
     Serial.flush();
@@ -744,6 +1247,7 @@ void loop()
     sleep_if_in_configured_window("loop");
     gv2_uart_poll();
     web_loop();
-    if (print_idle_heartbeat())
+    poll_status_led();
+    if (diagnose_and_print_health())
         print_power_after_heartbeat();
 }

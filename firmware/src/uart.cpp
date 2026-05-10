@@ -29,12 +29,15 @@ static constexpr uint32_t MAX_JPEG_LEN = 512UL * 1024UL;
 static constexpr size_t GV2_UART_RX_BUFFER_SIZE = 32UL * 1024UL;
 static constexpr size_t GV2_UART_READ_CHUNK_SIZE = 2048;
 static constexpr const char *FRAME_LOG_PATH = "/frames.log";
+static constexpr const char *HEALTH_LOG_PATH = "/health.log";
 
 static const uint8_t JPEG_MAGIC[4] = {'V', 'S', 'T', 'J'};
 static const uint8_t STATE_MAGIC[4] = {'V', 'S', 'T', 'S'};
 static const uint8_t ERROR_MAGIC[4] = {'V', 'S', 'T', 'E'};
+static const uint8_t HEARTBEAT_MAGIC[4] = {'V', 'S', 'T', 'H'};
 static constexpr int JPEG_HEADER_LEN = 1 + 1 + 1 + 2 + 2 + 2 + 2 + 4 + 4;
 static constexpr int ERROR_PAYLOAD_LEN = 1 + 1 + 4;
+static constexpr int HEARTBEAT_PAYLOAD_LEN = 1 + 4;
 
 struct JpegRxState {
     uint8_t magic_window[4] = {0, 0, 0, 0};
@@ -72,9 +75,16 @@ struct ErrorRxState {
     bool waiting_error_payload = false;
 };
 
+struct HeartbeatRxState {
+    uint8_t magic_window[4] = {0, 0, 0, 0};
+    uint8_t magic_filled = 0;
+    bool waiting_heartbeat_payload = false;
+};
+
 static JpegRxState jpeg_rx;
 static StateRxState state_rx;
 static ErrorRxState error_rx;
+static HeartbeatRxState heartbeat_rx;
 static Gv2UartStats stats;
 static const BaseConfig *log_config = nullptr;
 static const ModemGnssInfo *log_gnss = nullptr;
@@ -184,6 +194,9 @@ static void reset_uart_sync_windows()
     memset(error_rx.magic_window, 0, sizeof(error_rx.magic_window));
     error_rx.magic_filled = 0;
     error_rx.waiting_error_payload = false;
+    memset(heartbeat_rx.magic_window, 0, sizeof(heartbeat_rx.magic_window));
+    heartbeat_rx.magic_filled = 0;
+    heartbeat_rx.waiting_heartbeat_payload = false;
     jpeg_rx.waiting_jpeg_header = false;
     jpeg_rx.legacy_prefix_len = 0;
 }
@@ -416,6 +429,18 @@ static const char *gv2_error_name(uint8_t code, uint8_t detail)
 
 static void append_gv2_error_log(uint8_t code, uint8_t detail, uint32_t counter)
 {
+    static uint8_t last_code = 0;
+    static uint8_t last_detail = 0;
+    static uint32_t last_log_ms = 0;
+    uint32_t now = millis();
+    bool same_error = code == last_code && detail == last_detail;
+    if (same_error && last_log_ms != 0 && now - last_log_ms < 60000UL)
+        return;
+
+    last_code = code;
+    last_detail = detail;
+    last_log_ms = now;
+
     const BaseConfig *cfg = log_config;
 
     String s;
@@ -425,7 +450,7 @@ static void append_gv2_error_log(uint8_t code, uint8_t detail, uint32_t counter)
     s += ",";
     append_json_field(s, "device_name", cfg ? cfg->device_name : "vst-base");
     s += ",";
-    append_json_field(s, "event", "gv2_error");
+    append_json_field(s, "type", "gv2_error");
     s += ",";
     append_json_field(s, "name", gv2_error_name(code, detail));
     s += ",\"code\":";
@@ -436,7 +461,7 @@ static void append_gv2_error_log(uint8_t code, uint8_t detail, uint32_t counter)
     s += (unsigned long)counter;
     s += "}\n";
 
-    sdcard_append_log(FRAME_LOG_PATH, s);
+    sdcard_append_log(HEALTH_LOG_PATH, s);
 }
 
 static bool read_error_payload()
@@ -456,6 +481,8 @@ static bool read_error_payload()
     stats.last_error_code = (uint8_t)code;
     stats.last_error_detail = (uint8_t)detail;
     stats.last_error_counter = counter;
+    if (stats.last_error_code == 3 && stats.last_error_detail != 0)
+        stats.camera_error_active = true;
     stats.last_state = (uint8_t)code;
 
     Serial.printf("GV2: error code=%u detail=%u name=%s counter=%lu\n",
@@ -464,6 +491,29 @@ static bool read_error_payload()
                   gv2_error_name(stats.last_error_code, stats.last_error_detail),
                   (unsigned long)stats.last_error_counter);
     append_gv2_error_log(stats.last_error_code, stats.last_error_detail, stats.last_error_counter);
+    return true;
+}
+
+static bool read_heartbeat_payload()
+{
+    if (Gv2Serial.available() < HEARTBEAT_PAYLOAD_LEN)
+        return false;
+
+    int status = Gv2Serial.read();
+    uint32_t counter = 0;
+    if (status < 0 || !read_u32_le(counter))
+        return false;
+
+    heartbeat_rx.waiting_heartbeat_payload = false;
+    stats.bytes += HEARTBEAT_PAYLOAD_LEN;
+    stats.heartbeat_frames++;
+    stats.last_heartbeat_status = (uint8_t)status;
+    stats.last_heartbeat_counter = counter;
+    if ((stats.last_heartbeat_status & 0x01) != 0)
+        stats.camera_error_active = false;
+    Serial.printf("GV2: heartbeat status=%u counter=%lu\n",
+                  (unsigned)stats.last_heartbeat_status,
+                  (unsigned long)stats.last_heartbeat_counter);
     return true;
 }
 
@@ -656,7 +706,7 @@ bool gv2_uart_init(const UartConfig &config)
     size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
     Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
     Gv2Serial.setRxTimeout(1);
-    Serial.printf("POST: gv2_uart=Serial2 RX=%d TX=%d baud=%lu rx_buffer=%u protocol=VSTJ/VSTS/VSTE+CRC32\n",
+    Serial.printf("POST: gv2_uart=Serial2 RX=%d TX=%d baud=%lu rx_buffer=%u protocol=VSTJ/VSTS/VSTH/VSTE+CRC32\n",
                   active_config.rx_gpio,
                   active_config.tx_gpio,
                   (unsigned long)active_config.baud,
@@ -681,6 +731,12 @@ void gv2_uart_poll()
 
         if (error_rx.waiting_error_payload) {
             if (!read_error_payload())
+                break;
+            continue;
+        }
+
+        if (heartbeat_rx.waiting_heartbeat_payload) {
+            if (!read_heartbeat_payload())
                 break;
             continue;
         }
@@ -751,6 +807,8 @@ void gv2_uart_poll()
 
                 if (!valid)
                     stats.jpeg_invalid++;
+                else
+                    stats.camera_error_active = false;
 
                 append_frame_log(saved, valid, filter_match, detection_match, actuated, crc_ok, crc_actual, payload_len, saved ? filename : "");
 
@@ -844,6 +902,13 @@ void gv2_uart_poll()
             continue;
         }
 
+        shift_magic_window(heartbeat_rx.magic_window, &heartbeat_rx.magic_filled, value);
+        if (magic_matches(heartbeat_rx.magic_window, heartbeat_rx.magic_filled, HEARTBEAT_MAGIC)) {
+            heartbeat_rx.waiting_heartbeat_payload = true;
+            (void)read_heartbeat_payload();
+            continue;
+        }
+
         shift_magic_window(jpeg_rx.magic_window, &jpeg_rx.magic_filled, value);
         if (!magic_matches(jpeg_rx.magic_window, jpeg_rx.magic_filled, JPEG_MAGIC))
             continue;
@@ -856,4 +921,9 @@ void gv2_uart_poll()
 const Gv2UartStats &gv2_uart_stats()
 {
     return stats;
+}
+
+void gv2_uart_clear_camera_error()
+{
+    stats.camera_error_active = false;
 }

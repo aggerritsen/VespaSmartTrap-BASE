@@ -116,11 +116,16 @@ The base expects binary frames from the current GV2 firmware:
 State frame:
 VSTS + state_u8
 
+Heartbeat frame:
+VSTH + status_u8 + counter_u32_le
+
 JPEG frame:
 VSTJ + state_u8 + class_idx_u8 + conf_u8
      + bbox_x_u16_le + bbox_y_u16_le + bbox_w_u16_le + bbox_h_u16_le
      + jpeg_len_u32_le + crc32_u32_le + jpeg_bytes
 ```
+
+The GV2 heartbeat is an idle keepalive: it is sent after about 10 seconds of no other UART frames from GV2. A state change, JPEG frame, or error frame resets the heartbeat timer.
 
 The JPEG payload length is the trimmed JPEG length through the actual `FFD9` marker. CRC32 is calculated over exactly those JPEG bytes. The receiver only treats a frame as complete after the declared payload has arrived, CRC32 matches, and the JPEG structure is valid.
 

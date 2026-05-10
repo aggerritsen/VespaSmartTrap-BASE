@@ -42,6 +42,20 @@ static bool is_plausible_year(int year)
     return (year >= 2020 && year <= 2099);
 }
 
+static bool is_plausible_gnss_utc(const char *utc)
+{
+    if (!utc)
+        return false;
+
+    for (int i = 0; i < 14; i++) {
+        if (utc[i] < '0' || utc[i] > '9')
+            return false;
+    }
+
+    char year_buf[5] = {utc[0], utc[1], utc[2], utc[3], 0};
+    return is_plausible_year(atoi(year_buf));
+}
+
 static void pwrkey_pulse()
 {
     pinMode(MODEM_PWR, OUTPUT);
@@ -212,6 +226,135 @@ static bool wait_for_network_registration(uint32_t timeout_ms)
     return false;
 }
 
+static bool read_at_prefixed_line(const char *cmd, const char *prefix, String &line, uint32_t timeout_ms)
+{
+    line = "";
+    modem.sendAT(cmd);
+    if (modem.waitResponse(timeout_ms, prefix) != 1)
+        return false;
+
+    line = modem.stream.readStringUntil('\n');
+    line.trim();
+    modem.waitResponse(200);
+    return true;
+}
+
+static void print_at_raw_response(const char *label, const char *cmd, uint32_t timeout_ms)
+{
+    Serial.printf("MODEM: %s query AT%s\n", label, cmd);
+    modem.sendAT(cmd);
+
+    uint32_t start = millis();
+    bool printed = false;
+    while (millis() - start < timeout_ms) {
+        while (modem.stream.available()) {
+            String line = modem.stream.readStringUntil('\n');
+            line.trim();
+            if (!line.length())
+                continue;
+
+            Serial.printf("MODEM: %s rx [%s]\n", label, line.c_str());
+            printed = true;
+            if (line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR"))
+                return;
+        }
+        delay(10);
+    }
+
+    if (!printed)
+        Serial.printf("MODEM: %s rx timeout\n", label);
+}
+
+void modem_print_sim_network_status()
+{
+    String line;
+    if (read_at_prefixed_line("+CPIN?", "+CPIN:", line, 2000))
+        Serial.printf("MODEM: SIM status +CPIN:%s\n", line.c_str());
+    else {
+        Serial.println("MODEM: SIM status +CPIN? unavailable");
+        print_at_raw_response("SIM status raw", "+CPIN?", 3000);
+        print_at_raw_response("SIM insert raw", "+CSMINS?", 3000);
+    }
+
+    if (read_at_prefixed_line("+CEREG?", "+CEREG:", line, 2000))
+        Serial.printf("MODEM: registration +CEREG:%s\n", line.c_str());
+    else
+        Serial.println("MODEM: registration +CEREG? unavailable");
+
+    if (read_at_prefixed_line("+CREG?", "+CREG:", line, 2000))
+        Serial.printf("MODEM: registration +CREG:%s\n", line.c_str());
+    else
+        Serial.println("MODEM: registration +CREG? unavailable");
+}
+
+static bool modem_ping_host(const char *host)
+{
+    if (!host || !host[0])
+        return false;
+
+    Serial.printf("MODEM: LTE-M lookup ping host=%s\n", host);
+    modem.sendAT("+SNPING4=\"", host, "\",1,16,1000");
+
+    uint32_t start = millis();
+    bool saw_success = false;
+    while (millis() - start < 3000)
+    {
+        String line = modem.stream.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0)
+            continue;
+
+        Serial.printf("MODEM: ping rx %s\n", line.c_str());
+        if (line.indexOf("+SNPING4:") >= 0) {
+            int comma2 = line.lastIndexOf(',');
+            int latency_ms = comma2 >= 0 ? line.substring(comma2 + 1).toInt() : 0;
+            if (latency_ms > 0 && latency_ms < 60000) {
+                saw_success = true;
+            }
+            continue;
+        }
+        if (line == "OK")
+            return saw_success;
+        if (line == "ERROR")
+            return false;
+    }
+
+    return false;
+}
+
+static String extract_json_string_field(const String &body, const char *field)
+{
+    String needle = String("\"") + field + "\":\"";
+    int start = body.indexOf(needle);
+    if (start < 0)
+        return "";
+
+    start += needle.length();
+    int end = body.indexOf('"', start);
+    if (end < 0)
+        return "";
+
+    return body.substring(start, end);
+}
+
+static String extract_json_number_field(const String &body, const char *field)
+{
+    String needle = String("\"") + field + "\":";
+    int start = body.indexOf(needle);
+    if (start < 0)
+        return "";
+
+    start += needle.length();
+    while (start < body.length() && body[start] == ' ')
+        start++;
+
+    int end = start;
+    while (end < body.length() && body[end] >= '0' && body[end] <= '9')
+        end++;
+
+    return end > start ? body.substring(start, end) : "";
+}
+
 bool modem_init_early()
 {
     static bool done = false;
@@ -242,6 +385,113 @@ bool modem_init_early()
     Serial.println("MODEM: CTZR command sent");
 
     return true;
+}
+
+bool modem_validate_ltem(const char *apn,
+                         const char *lookup_primary,
+                         const char *lookup_secondary,
+                         uint32_t network_timeout_ms)
+{
+    if (!apn || !apn[0])
+        apn = "internet.m2m";
+
+    Serial.printf("MODEM: LTE-M validation begin apn=%s lookup_primary=%s lookup_secondary=%s\n",
+                  apn,
+                  lookup_primary && lookup_primary[0] ? lookup_primary : "-",
+                  lookup_secondary && lookup_secondary[0] ? lookup_secondary : "-");
+
+    if (!wait_for_network_registration(network_timeout_ms)) {
+        Serial.println("MODEM: LTE-M registration timeout");
+        return false;
+    }
+
+    if (!modem.gprsConnect(apn)) {
+        Serial.println("MODEM: LTE-M data attach FAILED");
+        return false;
+    }
+
+    IPAddress local_ip = modem.localIP();
+    Serial.printf("MODEM: LTE-M data attached local_ip=%s\n", local_ip.toString().c_str());
+
+    if (local_ip == IPAddress(0, 0, 0, 0)) {
+        Serial.println("MODEM: LTE-M validation FAILED; data attached but local IP is 0.0.0.0");
+        return false;
+    }
+
+    if (modem_ping_host(lookup_primary)) {
+        Serial.printf("MODEM: LTE-M lookup probe PASS host=%s\n", lookup_primary);
+        Serial.println("MODEM: LTE-M validation PASS bearer=attached ip=assigned lookup=reachable");
+        return true;
+    }
+
+    if (modem_ping_host(lookup_secondary)) {
+        Serial.printf("MODEM: LTE-M lookup probe PASS host=%s\n", lookup_secondary);
+        Serial.println("MODEM: LTE-M validation PASS bearer=attached ip=assigned lookup=reachable");
+        return true;
+    }
+
+    Serial.println("MODEM: LTE-M lookup probe WARN; bearer attached and IP assigned, but lookup ping was blocked or timed out");
+    Serial.println("MODEM: LTE-M validation PASS bearer=attached ip=assigned lookup=unreachable");
+    return true;
+}
+
+bool modem_test_world_clock(uint32_t timeout_ms)
+{
+    static const char *host = "worldtimeapi.org";
+    static const char *path = "/api/timezone/Etc/UTC";
+
+    Serial.printf("MODEM: world clock HTTP test begin host=%s path=%s\n", host, path);
+
+    TinyGsmClient client(modem, 1);
+    if (!client.connect(host, 80, timeout_ms / 1000)) {
+        client.stop();
+        Serial.println("MODEM: world clock HTTP connect FAILED");
+        return false;
+    }
+
+    client.print(String("GET ") + path + " HTTP/1.1\r\n" +
+                 "Host: " + host + "\r\n" +
+                 "User-Agent: VST-BASE/0.2\r\n" +
+                 "Connection: close\r\n\r\n");
+
+    uint32_t start = millis();
+    String response;
+    response.reserve(1024);
+    while (millis() - start < timeout_ms) {
+        while (client.available()) {
+            char c = (char)client.read();
+            if (response.length() < 1600)
+                response += c;
+        }
+        if (!client.connected() && !client.available())
+            break;
+        delay(10);
+    }
+    client.stop();
+
+    int line_end = response.indexOf('\n');
+    String status_line = line_end >= 0 ? response.substring(0, line_end) : response;
+    status_line.trim();
+    Serial.printf("MODEM: world clock HTTP status [%s]\n", status_line.c_str());
+
+    bool ok = status_line.indexOf(" 200 ") >= 0;
+    int body_start = response.indexOf("\r\n\r\n");
+    String body = body_start >= 0 ? response.substring(body_start + 4) : "";
+    String utc = extract_json_string_field(body, "utc_datetime");
+    String unixtime = extract_json_number_field(body, "unixtime");
+
+    if (utc.length() || unixtime.length()) {
+        Serial.printf("MODEM: world clock utc=%s unixtime=%s\n",
+                      utc.length() ? utc.c_str() : "-",
+                      unixtime.length() ? unixtime.c_str() : "-");
+    }
+
+    if (!ok)
+        Serial.println("MODEM: world clock HTTP test FAILED");
+    else
+        Serial.println("MODEM: world clock HTTP test PASS");
+
+    return ok;
 }
 
 bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms)
@@ -292,6 +542,11 @@ bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms)
     return false;
 }
 
+bool modem_check_network_registered(uint32_t timeout_ms)
+{
+    return wait_for_network_registration(timeout_ms);
+}
+
 bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms)
 {
     info = ModemGnssInfo{};
@@ -307,6 +562,8 @@ bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms)
     info.command_ok = true;
     uint32_t start = millis();
     bool saw_powered_response = false;
+    bool saw_first_valid_utc = false;
+    char first_valid_utc[24] = {0};
 
     while (millis() - start < sample_ms)
     {
@@ -319,6 +576,15 @@ bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms)
             if (parse_gnss_info_line(line, info))
             {
                 saw_powered_response = true;
+                if (is_plausible_gnss_utc(info.utc)) {
+                    info.utc_valid = true;
+                    if (!saw_first_valid_utc) {
+                        snprintf(first_valid_utc, sizeof(first_valid_utc), "%s", info.utc);
+                        saw_first_valid_utc = true;
+                    } else if (strcmp(first_valid_utc, info.utc) != 0) {
+                        info.utc_advancing = true;
+                    }
+                }
                 Serial.printf("GNSS: powered=%s fix_raw=%s valid=%s utc=%s lat=%s lon=%s sats=%s\n",
                               info.powered ? "YES" : "NO",
                               info.fix ? "YES" : "NO",

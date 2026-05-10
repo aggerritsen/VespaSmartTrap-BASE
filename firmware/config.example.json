@@ -18,6 +18,12 @@
     "network_timeout_seconds": 10,
     "allow_gnss_fallback": true
   },
+  "modem": {
+    "mode": 1,
+    "apn": "internet.m2m",
+    "lookup_primary": "1.1.1.1",
+    "lookup_secondary": "8.8.8.8"
+  },
   "stepper": {
     "speed_steps_per_second": 400,
     "rotation_degrees": 90,
@@ -31,10 +37,13 @@
     "occurrence": 3
   },
   "power": {
-    "log_interval_seconds": 60,
+    "log_interval_seconds": 900,
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6
+  },
+  "health": {
+    "led": 1
   },
   "web": {
     "mode": 2,

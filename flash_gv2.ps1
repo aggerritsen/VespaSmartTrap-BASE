@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Port = 'COM7',
+    [string]$Port = 'COM31',
     [int]$Baudrate = 921600,
     [string]$Protocol = 'xmodem',
     [string]$ImageFile = 'we2_image_gen_local\output_case1_sec_wlcsp\output.img',

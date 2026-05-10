@@ -1,8 +1,10 @@
 //sdcard.cpp
 
 #include "sdcard.h"
+#include "config_example_generated.h"
 #include <ArduinoJson.h>
 #include <SD_MMC.h>
+#include <esp_log.h>
 #include <strings.h>
 #include <time.h>
 
@@ -16,56 +18,13 @@
 static bool sd_ok = false;
 static File active_jpeg_file;
 static char active_jpeg_path[64] = {0};
+static char configured_image_prefix[33] = "/frame_";
 static uint32_t active_jpeg_bytes = 0;
+static uint32_t last_mount_attempt_ms = 0;
+static uint32_t last_sd_failure_log_ms = 0;
+static constexpr uint32_t SD_REMOUNT_BACKOFF_MS = 5000;
 
 static const char *CONFIG_PATH = "/config.json";
-static const char *DEFAULT_CONFIG =
-    "{\n"
-    "  \"schema_version\": 1,\n"
-    "  \"device_name\": \"vst-base-001\",\n"
-    "  \"uart\": {\n"
-    "    \"rx_gpio\": 16,\n"
-    "    \"tx_gpio\": 17,\n"
-    "    \"baud\": 921600\n"
-    "  },\n"
-    "  \"logging\": {\n"
-    "    \"post_log\": \"/post.log\",\n"
-    "    \"image_prefix\": \"/frame_\"\n"
-    "  },\n"
-    "  \"features\": {\n"
-    "    \"gnss_probe\": true,\n"
-    "    \"ack_frames\": true\n"
-    "  },\n"
-    "  \"time\": {\n"
-    "    \"network_timeout_seconds\": 10,\n"
-    "    \"allow_gnss_fallback\": true\n"
-    "  },\n"
-    "  \"stepper\": {\n"
-    "    \"speed_steps_per_second\": 400,\n"
-    "    \"rotation_degrees\": 90,\n"
-    "    \"steps_per_revolution\": 2048,\n"
-    "    \"reverse_wait_ms\": 1000,\n"
-    "    \"start_direction\": \"ccw\"\n"
-    "  },\n"
-    "  \"inference\": {\n"
-    "    \"confidence_threshold\": 0.89,\n"
-    "    \"detected_class\": 3,\n"
-    "    \"occurrence\": 3\n"
-    "  },\n"
-    "  \"power\": {\n"
-    "    \"log_interval_seconds\": 60,\n"
-    "    \"deep_sleep\": 2,\n"
-    "    \"deep_sleep_start_hour\": 18,\n"
-    "    \"deep_sleep_end_hour\": 6\n"
-    "  },\n"
-    "  \"web\": {\n"
-    "    \"mode\": 2,\n"
-    "    \"ssid\": \"VST-BASE\",\n"
-    "    \"password\": \"\",\n"
-    "    \"append_mac\": true\n"
-    "  }\n"
-    "}\n";
-
 static const char *sd_card_type_name(uint8_t type)
 {
     switch (type) {
@@ -74,6 +33,106 @@ static const char *sd_card_type_name(uint8_t type)
         case CARD_SDHC: return "SDHC/SDXC";
         default: return "UNKNOWN";
     }
+}
+
+static void sdcard_set_driver_log_level(esp_log_level_t level)
+{
+    esp_log_level_set("sdmmc_req", level);
+    esp_log_level_set("diskio_sdmmc", level);
+    esp_log_level_set("sdmmc_common", level);
+    esp_log_level_set("vfs_fat_sdmmc", level);
+}
+
+class SdDriverLogSilencer {
+public:
+    SdDriverLogSilencer()
+    {
+        sdcard_set_driver_log_level(ESP_LOG_NONE);
+    }
+
+    ~SdDriverLogSilencer()
+    {
+        sdcard_set_driver_log_level(ESP_LOG_ERROR);
+    }
+};
+
+static void sdcard_mark_failed(const char *reason)
+{
+    sdcard_abort_jpeg();
+    sd_ok = false;
+
+    uint32_t now = millis();
+    if (last_sd_failure_log_ms == 0 || now - last_sd_failure_log_ms > SD_REMOUNT_BACKOFF_MS) {
+        Serial.printf("SD: marked unavailable reason=%s; will retry mount\n", reason ? reason : "io_failed");
+        last_sd_failure_log_ms = now;
+    }
+
+    {
+        SdDriverLogSilencer quiet;
+        SD_MMC.end();
+    }
+}
+
+static bool sdcard_try_mount(bool verbose)
+{
+    uint32_t now = millis();
+    if (last_mount_attempt_ms != 0 && now - last_mount_attempt_ms < SD_REMOUNT_BACKOFF_MS)
+        return false;
+    last_mount_attempt_ms = now;
+
+    if (verbose) {
+        Serial.println("SD: initializing SD_MMC with custom pins");
+        Serial.printf("SD: CLK=%d CMD=%d DATA=%d mode=1-bit\n", SD_CLK, SD_CMD, SD_DATA);
+    }
+
+    bool mounted = false;
+    {
+        SdDriverLogSilencer quiet;
+        SD_MMC.setPins(SD_CLK, SD_CMD, SD_DATA);
+        mounted = SD_MMC.begin("/sdcard", true);
+    }
+
+    if (!mounted)
+    {
+        if (verbose)
+            Serial.println("SD: mount FAILED");
+        sd_ok = false;
+        return false;
+    }
+
+    uint64_t size = SD_MMC.cardSize();
+    uint64_t used = SD_MMC.usedBytes();
+    uint8_t type = SD_MMC.cardType();
+
+    if (size == 0) {
+        if (verbose)
+            Serial.println("SD: mount FAILED card size is 0");
+        {
+            SdDriverLogSilencer quiet;
+            SD_MMC.end();
+        }
+        sd_ok = false;
+        return false;
+    }
+
+    if (verbose || !sd_ok) {
+        Serial.printf("SD: mounted OK\n");
+        Serial.printf("SD: card_type=%s (%u)\n", sd_card_type_name(type), type);
+        Serial.printf("SD: size_mb=%llu\n", size / (1024 * 1024));
+        Serial.printf("SD: used_bytes=%llu total_bytes=%llu\n", used, size);
+        Serial.printf("SD: free_bytes=%llu\n", size > used ? (size - used) : 0);
+    }
+
+    sd_ok = true;
+    return true;
+}
+
+static bool sdcard_ensure_ready()
+{
+    if (sd_ok)
+        return true;
+
+    return sdcard_try_mount(false);
 }
 
 static JsonObject ensure_object(JsonDocument &doc, const char *name, bool &changed)
@@ -86,49 +145,24 @@ static JsonObject ensure_object(JsonDocument &doc, const char *name, bool &chang
     return doc[name].to<JsonObject>();
 }
 
-static bool ensure_string(JsonObject obj, const char *name, const char *value)
+static bool merge_missing_config(JsonVariant target, JsonVariantConst defaults)
 {
-    if (!obj[name].isNull())
+    if (!defaults.is<JsonObjectConst>())
         return false;
 
-    obj[name] = value;
-    return true;
-}
-
-static bool ensure_uint(JsonObject obj, const char *name, uint32_t value)
-{
-    if (!obj[name].isNull())
-        return false;
-
-    obj[name] = value;
-    return true;
-}
-
-static bool ensure_int(JsonObject obj, const char *name, int value)
-{
-    if (!obj[name].isNull())
-        return false;
-
-    obj[name] = value;
-    return true;
-}
-
-static bool ensure_float(JsonObject obj, const char *name, float value)
-{
-    if (!obj[name].isNull())
-        return false;
-
-    obj[name] = value;
-    return true;
-}
-
-static bool ensure_bool(JsonObject obj, const char *name, bool value)
-{
-    if (!obj[name].isNull())
-        return false;
-
-    obj[name] = value;
-    return true;
+    bool changed = false;
+    JsonObject target_obj = target.as<JsonObject>();
+    for (JsonPairConst kv : defaults.as<JsonObjectConst>()) {
+        JsonVariant target_value = target_obj[kv.key()];
+        JsonVariantConst default_value = kv.value();
+        if (target_value.isNull()) {
+            target_obj[kv.key()].set(default_value);
+            changed = true;
+        } else if (target_value.is<JsonObject>() && default_value.is<JsonObjectConst>()) {
+            changed |= merge_missing_config(target_value, default_value);
+        }
+    }
+    return changed;
 }
 
 static bool remove_key(JsonObject obj, const char *name)
@@ -156,62 +190,29 @@ static bool remove_legacy_config_fields(JsonDocument &doc)
     if (!power.isNull())
         changed |= remove_key(power, "_log_interval_comment");
 
+    JsonObject modem = root["modem"];
+    if (!modem.isNull())
+        changed |= remove_key(modem, "apn_choices");
+
     return changed;
 }
 
 static bool ensure_config_defaults(JsonDocument &doc)
 {
-    bool changed = remove_legacy_config_fields(doc);
-
-    if (doc["schema_version"].isNull()) {
-        doc["schema_version"] = 1;
-        changed = true;
-    }
-    if (doc["device_name"].isNull()) {
-        doc["device_name"] = "vst-base-001";
-        changed = true;
+    bool changed = false;
+    JsonDocument defaults;
+    DeserializationError err = deserializeJson(defaults, CONFIG_EXAMPLE_JSON);
+    if (err) {
+        Serial.printf("SD: embedded config.example parse FAILED error=%s\n", err.c_str());
+        return changed;
     }
 
-    JsonObject uart = ensure_object(doc, "uart", changed);
-    changed |= ensure_uint(uart, "rx_gpio", 16);
-    changed |= ensure_uint(uart, "tx_gpio", 17);
-    changed |= ensure_uint(uart, "baud", 921600);
+    if (!doc.is<JsonObject>()) {
+        Serial.println("SD: config defaults skipped; root is not a JSON object");
+        return changed;
+    }
 
-    JsonObject logging = ensure_object(doc, "logging", changed);
-    changed |= ensure_string(logging, "post_log", "/post.log");
-    changed |= ensure_string(logging, "image_prefix", "/frame_");
-
-    JsonObject features = ensure_object(doc, "features", changed);
-    changed |= ensure_bool(features, "gnss_probe", true);
-    changed |= ensure_bool(features, "ack_frames", true);
-
-    JsonObject time = ensure_object(doc, "time", changed);
-    changed |= ensure_uint(time, "network_timeout_seconds", 10);
-    changed |= ensure_bool(time, "allow_gnss_fallback", true);
-
-    JsonObject stepper = ensure_object(doc, "stepper", changed);
-    changed |= ensure_uint(stepper, "speed_steps_per_second", 400);
-    changed |= ensure_uint(stepper, "rotation_degrees", 90);
-    changed |= ensure_uint(stepper, "steps_per_revolution", 2048);
-    changed |= ensure_uint(stepper, "reverse_wait_ms", 1000);
-    changed |= ensure_string(stepper, "start_direction", "ccw");
-
-    JsonObject inference = ensure_object(doc, "inference", changed);
-    changed |= ensure_float(inference, "confidence_threshold", 0.89f);
-    changed |= ensure_int(inference, "detected_class", 3);
-    changed |= ensure_uint(inference, "occurrence", 3);
-
-    JsonObject power = ensure_object(doc, "power", changed);
-    changed |= ensure_uint(power, "log_interval_seconds", 60);
-    changed |= ensure_uint(power, "deep_sleep", 2);
-    changed |= ensure_uint(power, "deep_sleep_start_hour", 18);
-    changed |= ensure_uint(power, "deep_sleep_end_hour", 6);
-
-    JsonObject web = ensure_object(doc, "web", changed);
-    changed |= ensure_uint(web, "mode", 2);
-    changed |= ensure_string(web, "ssid", "VST-BASE");
-    changed |= ensure_string(web, "password", "");
-    changed |= ensure_bool(web, "append_mac", true);
+    changed |= merge_missing_config(doc.as<JsonVariant>(), defaults.as<JsonVariantConst>());
 
     return changed;
 }
@@ -224,7 +225,8 @@ static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id)
     if (now > 1700000000 && localtime_r(&now, &tm)) {
         snprintf(path,
                  path_len,
-                 "/%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
+                 "%s%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
+                 configured_image_prefix,
                  tm.tm_year + 1900,
                  tm.tm_mon + 1,
                  tm.tm_mday,
@@ -235,7 +237,7 @@ static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id)
         return;
     }
 
-    snprintf(path, path_len, "/uptime_%010lu_%06lu.jpg", millis(), (unsigned long)frame_id);
+    snprintf(path, path_len, "%suptime_%010lu_%06lu.jpg", configured_image_prefix, millis(), (unsigned long)frame_id);
 }
 
 static bool is_anti_clockwise_direction(const char *direction)
@@ -265,30 +267,7 @@ static bool is_clockwise_direction(const char *direction)
    ============================= */
 bool sdcard_init()
 {
-    Serial.println("SD: initializing SD_MMC with custom pins");
-    Serial.printf("SD: CLK=%d CMD=%d DATA=%d mode=1-bit\n", SD_CLK, SD_CMD, SD_DATA);
-
-    SD_MMC.setPins(SD_CLK, SD_CMD, SD_DATA);
-
-    if (!SD_MMC.begin("/sdcard", true))
-    {
-        Serial.println("SD: mount FAILED");
-        sd_ok = false;
-        return false;
-    }
-
-    uint64_t size = SD_MMC.cardSize();
-    uint64_t used = SD_MMC.usedBytes();
-    uint8_t type = SD_MMC.cardType();
-
-    Serial.printf("SD: mounted OK\n");
-    Serial.printf("SD: card_type=%s (%u)\n", sd_card_type_name(type), type);
-    Serial.printf("SD: size_mb=%llu\n", size / (1024 * 1024));
-    Serial.printf("SD: used_bytes=%llu total_bytes=%llu\n", used, size);
-    Serial.printf("SD: free_bytes=%llu\n", size > used ? (size - used) : 0);
-
-    sd_ok = true;
-    return true;
+    return sdcard_try_mount(true);
 }
 
 bool sdcard_available()
@@ -298,12 +277,16 @@ bool sdcard_available()
 
 bool sdcard_ensure_config()
 {
-    if (!sd_ok)
+    if (!sdcard_ensure_ready())
         return false;
 
     if (SD_MMC.exists(CONFIG_PATH))
     {
-        File f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+        File f;
+        {
+            SdDriverLogSilencer quiet;
+            f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+        }
         if (!f)
         {
             Serial.printf("SD: config open FAILED path=%s\n", CONFIG_PATH);
@@ -320,7 +303,10 @@ bool sdcard_ensure_config()
         }
 
         Serial.printf("SD: config found path=%s bytes=%u\n", CONFIG_PATH, (unsigned)size);
-        f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+        {
+            SdDriverLogSilencer quiet;
+            f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+        }
         if (!f)
         {
             Serial.printf("SD: config reopen FAILED path=%s\n", CONFIG_PATH);
@@ -344,14 +330,21 @@ bool sdcard_ensure_config()
         if (SD_MMC.exists(CONFIG_PATH))
             SD_MMC.remove(CONFIG_PATH);
 
-        f = SD_MMC.open(CONFIG_PATH, FILE_WRITE);
+        {
+            SdDriverLogSilencer quiet;
+            f = SD_MMC.open(CONFIG_PATH, FILE_WRITE);
+        }
         if (!f)
         {
             Serial.printf("SD: config update open FAILED path=%s\n", CONFIG_PATH);
             return false;
         }
 
-        size_t written = serializeJsonPretty(doc, f);
+        size_t written = 0;
+        {
+            SdDriverLogSilencer quiet;
+            written = serializeJsonPretty(doc, f);
+        }
         f.println();
         f.close();
         Serial.printf("SD: config updated with missing defaults path=%s bytes=%u\n",
@@ -360,15 +353,23 @@ bool sdcard_ensure_config()
         return true;
     }
 
-    File f = SD_MMC.open(CONFIG_PATH, FILE_WRITE);
+    File f;
+    {
+        SdDriverLogSilencer quiet;
+        f = SD_MMC.open(CONFIG_PATH, FILE_WRITE);
+    }
     if (!f)
     {
         Serial.printf("SD: config create FAILED path=%s\n", CONFIG_PATH);
         return false;
     }
 
-    size_t expected = strlen(DEFAULT_CONFIG);
-    size_t written = f.print(DEFAULT_CONFIG);
+    size_t expected = strlen(CONFIG_EXAMPLE_JSON);
+    size_t written = 0;
+    {
+        SdDriverLogSilencer quiet;
+        written = f.print(CONFIG_EXAMPLE_JSON);
+    }
     f.close();
 
     if (written != expected)
@@ -388,10 +389,14 @@ bool sdcard_load_config(BaseConfig &config)
 {
     config = BaseConfig{};
 
-    if (!sd_ok)
+    if (!sdcard_ensure_ready())
         return false;
 
-    File f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+    File f;
+    {
+        SdDriverLogSilencer quiet;
+        f = SD_MMC.open(CONFIG_PATH, FILE_READ);
+    }
     if (!f)
     {
         Serial.printf("SD: config load FAILED path=%s\n", CONFIG_PATH);
@@ -412,6 +417,21 @@ bool sdcard_load_config(BaseConfig &config)
 
     const char *device_name = doc["device_name"] | config.device_name;
     strlcpy(config.device_name, device_name, sizeof(config.device_name));
+
+    JsonObject logging = doc["logging"];
+    const char *post_log = logging["post_log"] | config.logging.post_log;
+    const char *image_prefix = logging["image_prefix"] | config.logging.image_prefix;
+    strlcpy(config.logging.post_log, post_log, sizeof(config.logging.post_log));
+    strlcpy(config.logging.image_prefix, image_prefix, sizeof(config.logging.image_prefix));
+    if (!config.logging.post_log[0] || config.logging.post_log[0] != '/')
+        strlcpy(config.logging.post_log, "/post.log", sizeof(config.logging.post_log));
+    if (!config.logging.image_prefix[0] || config.logging.image_prefix[0] != '/')
+        strlcpy(config.logging.image_prefix, "/frame_", sizeof(config.logging.image_prefix));
+    strlcpy(configured_image_prefix, config.logging.image_prefix, sizeof(configured_image_prefix));
+
+    JsonObject features = doc["features"];
+    config.features.gnss_probe = features["gnss_probe"] | config.features.gnss_probe;
+    config.features.ack_frames = features["ack_frames"] | config.features.ack_frames;
 
     JsonObject uart = doc["uart"];
     config.uart.rx_gpio = uart["rx_gpio"] | config.uart.rx_gpio;
@@ -471,6 +491,23 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.time.network_timeout_seconds > 300)
         config.time.network_timeout_seconds = 300;
 
+    JsonObject modem = doc["modem"];
+    config.modem.mode = modem["mode"] | config.modem.mode;
+    const char *apn = modem["apn"] | config.modem.apn;
+    const char *lookup_primary = modem["lookup_primary"] | config.modem.lookup_primary;
+    const char *lookup_secondary = modem["lookup_secondary"] | config.modem.lookup_secondary;
+    strlcpy(config.modem.apn, apn, sizeof(config.modem.apn));
+    strlcpy(config.modem.lookup_primary, lookup_primary, sizeof(config.modem.lookup_primary));
+    strlcpy(config.modem.lookup_secondary, lookup_secondary, sizeof(config.modem.lookup_secondary));
+    if (config.modem.mode > 2)
+        config.modem.mode = 0;
+    if (!config.modem.apn[0])
+        strlcpy(config.modem.apn, "internet.m2m", sizeof(config.modem.apn));
+    if (!config.modem.lookup_primary[0])
+        strlcpy(config.modem.lookup_primary, "1.1.1.1", sizeof(config.modem.lookup_primary));
+    if (!config.modem.lookup_secondary[0])
+        strlcpy(config.modem.lookup_secondary, "8.8.8.8", sizeof(config.modem.lookup_secondary));
+
     JsonObject web = doc["web"];
     config.web.mode = web["mode"] | config.web.mode;
     const char *web_ssid = web["ssid"] | config.web.ssid;
@@ -493,7 +530,7 @@ bool sdcard_load_config(BaseConfig &config)
     config.power.deep_sleep_end_hour =
         power["deep_sleep_end_hour"] | config.power.deep_sleep_end_hour;
     if (config.power.log_interval_seconds == 0)
-        config.power.log_interval_seconds = 60;
+        config.power.log_interval_seconds = 900;
     if (config.power.log_interval_seconds > 86400)
         config.power.log_interval_seconds = 86400;
     if (config.power.deep_sleep > 2)
@@ -505,8 +542,16 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.power.deep_sleep_start_hour == config.power.deep_sleep_end_hour)
         config.power.deep_sleep = 0;
 
-    Serial.printf("SD: config loaded device=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 time_network_timeout_seconds=%u time_gnss_fallback=%s\n",
+    JsonObject health = doc["health"];
+    config.health.led = health["led"] | config.health.led;
+    config.health.led = config.health.led ? 1 : 0;
+
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 health_led=%u time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
+                  config.logging.post_log,
+                  config.logging.image_prefix,
+                  config.features.gnss_probe ? "YES" : "NO",
+                  config.features.ack_frames ? "YES" : "NO",
                   config.uart.rx_gpio,
                   config.uart.tx_gpio,
                   (unsigned long)config.uart.baud,
@@ -524,25 +569,39 @@ bool sdcard_load_config(BaseConfig &config)
                   config.power.deep_sleep,
                   config.power.deep_sleep_start_hour,
                   config.power.deep_sleep_end_hour,
+                  config.health.led,
                   config.time.network_timeout_seconds,
-                  config.time.allow_gnss_fallback ? "YES" : "NO");
+                  config.time.allow_gnss_fallback ? "YES" : "NO",
+                  config.modem.mode,
+                  config.modem.apn,
+                  config.modem.lookup_primary,
+                  config.modem.lookup_secondary);
 
     return true;
 }
 
 bool sdcard_append_log(const char *path, const String &text)
 {
-    if (!sd_ok || !path || !path[0])
+    if (!path || !path[0] || !sdcard_ensure_ready())
         return false;
 
-    File f = SD_MMC.open(path, FILE_APPEND);
+    File f;
+    {
+        SdDriverLogSilencer quiet;
+        f = SD_MMC.open(path, FILE_APPEND);
+    }
     if (!f)
     {
         Serial.printf("SD: log open FAILED path=%s\n", path);
+        sdcard_mark_failed("log_open_failed");
         return false;
     }
 
-    size_t written = f.print(text);
+    size_t written = 0;
+    {
+        SdDriverLogSilencer quiet;
+        written = f.print(text);
+    }
     f.close();
 
     if (written != text.length())
@@ -551,6 +610,7 @@ bool sdcard_append_log(const char *path, const String &text)
                       path,
                       (unsigned)written,
                       (unsigned)text.length());
+        sdcard_mark_failed("log_write_incomplete");
         return false;
     }
 
@@ -560,20 +620,32 @@ bool sdcard_append_log(const char *path, const String &text)
 
 bool sdcard_write_log(const char *path, const String &text)
 {
-    if (!sd_ok || !path || !path[0])
+    if (!path || !path[0] || !sdcard_ensure_ready())
         return false;
 
-    if (SD_MMC.exists(path))
-        SD_MMC.remove(path);
+    {
+        SdDriverLogSilencer quiet;
+        if (SD_MMC.exists(path))
+            SD_MMC.remove(path);
+    }
 
-    File f = SD_MMC.open(path, FILE_WRITE);
+    File f;
+    {
+        SdDriverLogSilencer quiet;
+        f = SD_MMC.open(path, FILE_WRITE);
+    }
     if (!f)
     {
         Serial.printf("SD: log open FAILED path=%s\n", path);
+        sdcard_mark_failed("log_open_failed");
         return false;
     }
 
-    size_t written = f.print(text);
+    size_t written = 0;
+    {
+        SdDriverLogSilencer quiet;
+        written = f.print(text);
+    }
     f.close();
 
     if (written != text.length())
@@ -582,6 +654,7 @@ bool sdcard_write_log(const char *path, const String &text)
                       path,
                       (unsigned)written,
                       (unsigned)text.length());
+        sdcard_mark_failed("log_write_incomplete");
         return false;
     }
 
@@ -594,7 +667,7 @@ bool sdcard_write_log(const char *path, const String &text)
    ============================= */
 bool sdcard_save_jpeg(uint32_t frame_id, const uint8_t *data, size_t len, char *out_path, size_t out_path_len)
 {
-    if (!sd_ok)
+    if (!sdcard_ensure_ready())
         return false;
 
     char path[64];
@@ -603,22 +676,35 @@ bool sdcard_save_jpeg(uint32_t frame_id, const uint8_t *data, size_t len, char *
         strlcpy(out_path, path, out_path_len);
     }
 
-    if (SD_MMC.exists(path))
-        SD_MMC.remove(path);
+    {
+        SdDriverLogSilencer quiet;
+        if (SD_MMC.exists(path))
+            SD_MMC.remove(path);
+    }
 
-    File f = SD_MMC.open(path, FILE_WRITE);
+    File f;
+    {
+        SdDriverLogSilencer quiet;
+        f = SD_MMC.open(path, FILE_WRITE);
+    }
     if (!f)
     {
         Serial.printf("SD: open FAILED path=%s\n", path);
+        sdcard_mark_failed("jpeg_open_failed");
         return false;
     }
 
-    size_t written = f.write(data, len);
+    size_t written = 0;
+    {
+        SdDriverLogSilencer quiet;
+        written = f.write(data, len);
+    }
     f.close();
 
     if (written != len)
     {
         Serial.printf("SD: write incomplete written=%u expected=%u\n", written, len);
+        sdcard_mark_failed("jpeg_write_incomplete");
         return false;
     }
 
@@ -628,22 +714,29 @@ bool sdcard_save_jpeg(uint32_t frame_id, const uint8_t *data, size_t len, char *
 
 bool sdcard_begin_jpeg(uint32_t frame_id)
 {
-    if (!sd_ok)
+    if (!sdcard_ensure_ready())
         return false;
 
     sdcard_abort_jpeg();
 
     make_jpeg_path(active_jpeg_path, sizeof(active_jpeg_path), frame_id);
-    if (SD_MMC.exists(active_jpeg_path))
-        SD_MMC.remove(active_jpeg_path);
+    {
+        SdDriverLogSilencer quiet;
+        if (SD_MMC.exists(active_jpeg_path))
+            SD_MMC.remove(active_jpeg_path);
+    }
 
-    active_jpeg_file = SD_MMC.open(active_jpeg_path, FILE_WRITE);
+    {
+        SdDriverLogSilencer quiet;
+        active_jpeg_file = SD_MMC.open(active_jpeg_path, FILE_WRITE);
+    }
     active_jpeg_bytes = 0;
 
     if (!active_jpeg_file)
     {
         Serial.printf("SD: jpeg stream open FAILED path=%s\n", active_jpeg_path);
         active_jpeg_path[0] = '\0';
+        sdcard_mark_failed("jpeg_stream_open_failed");
         return false;
     }
 
@@ -656,13 +749,18 @@ bool sdcard_write_jpeg_chunk(const uint8_t *data, size_t len)
     if (!sd_ok || !active_jpeg_file || !data || len == 0)
         return false;
 
-    size_t written = active_jpeg_file.write(data, len);
+    size_t written = 0;
+    {
+        SdDriverLogSilencer quiet;
+        written = active_jpeg_file.write(data, len);
+    }
     if (written != len)
     {
         Serial.printf("SD: jpeg stream write incomplete path=%s written=%u expected=%u\n",
                       active_jpeg_path,
                       (unsigned)written,
                       (unsigned)len);
+        sdcard_mark_failed("jpeg_stream_write_incomplete");
         return false;
     }
 

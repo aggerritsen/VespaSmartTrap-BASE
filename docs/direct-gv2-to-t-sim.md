@@ -18,9 +18,12 @@ GV2 sends framed messages over UART1 to the T-SIM receiver:
 
 ```text
 VSTS + state
+VSTH + status + counter_u32_le
 VSTJ + inference metadata + jpeg length + crc32 + jpeg payload
 VSTE + error_code + detail + counter_u32_le
 ```
+
+`VSTH` is an idle keepalive. The GV2 firmware sends it after roughly 10 seconds without any other GV2 UART frame.
 
 Error frames currently use:
 

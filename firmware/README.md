@@ -63,9 +63,9 @@ On startup, `setup()` performs:
 3. Ensures `/config.json` exists, adds any missing default fields, and loads config.
 4. Enables modem rails through the AXP2101 PMU.
 5. Probes the SIM7080 with AT commands.
-6. Enables modem network time commands and waits for registration.
-7. Reads `AT+CCLK?` into `YYYYMMDD_HHMMSS` format and sets system time if valid.
-8. Powers GNSS with `AT+CGNSPWR=1` and samples `AT+CGNSINF` for up to 10 seconds.
+6. Runs the configured modem mode.
+7. Reads `AT+CCLK?` into `YYYYMMDD_HHMMSS` format and sets system time if valid when modem time is enabled.
+8. Powers GNSS with `AT+CGNSPWR=1` and samples `AT+CGNSINF` for up to 10 seconds when GNSS probing or fallback is enabled.
 9. If configured local time is inside the deep-sleep window, stops the GV2 UART, sets the GV2 UART pins high-Z, drives the GV2 power-enable GPIO LOW, shuts down modem/GNSS rails, and enters ESP32 deep sleep until the configured wake hour.
 10. Starts the WiFi web service when enabled in config.
 11. Initializes power telemetry.
@@ -86,9 +86,14 @@ The receiver expects binary frames from the current GV2 firmware.
 State frame:
 VSTS + state_u8
 
+Heartbeat frame:
+VSTH + status_u8 + counter_u32_le
+
 JPEG frame:
 VSTJ + state_u8 + class_idx_u8 + conf_u8 + bbox_x_u16_le + bbox_y_u16_le + bbox_w_u16_le + bbox_h_u16_le + jpeg_len_u32_le + crc32_u32_le + jpeg_bytes
 ```
+
+The heartbeat is expected only as an idle keepalive, about every 10 seconds when GV2 has not sent a state change, JPEG frame, or error frame.
 
 The JPEG header contains the best detection box from the GV2 inference result as `x,y,w,h` coordinates. The length is the trimmed JPEG payload length through the real `FFD9` marker. CRC32 is computed over exactly those JPEG bytes. The receiver prints completion output only after all `jpeg_len_u32_le` payload bytes are received, the CRC matches, and the configured inference filter has been evaluated.
 
@@ -96,8 +101,9 @@ The JPEG header contains the best detection box from the GV2 inference result as
 
 | State | Responsibility |
 | --- | --- |
-| Magic scan | Wait for `VSTS` or `VSTJ` |
+| Magic scan | Wait for `VSTS`, `VSTH`, `VSTE`, or `VSTJ` |
 | State frame | Read one state byte and update diagnostics |
+| Heartbeat frame | Read status and counter so health checks can distinguish "GV2 alive, no JPEG yet" from a dead camera path |
 | JPEG header | Read state, class, confidence, bounding box, payload length, and CRC32 |
 | JPEG payload | Read exactly the declared JPEG bytes into RAM, validate CRC32/JPEG structure, update the consecutive detection count, actuate and save only on a configured detection match, and append `/frames.log` |
 
@@ -167,6 +173,27 @@ UART pins can also be changed without rebuilding:
 
 GV2 power switching is controlled at build time with `GV2_POWER_GPIO_CFG`, defaulting to GPIO 43 in `platformio.ini`. The pin is driven HIGH during boot/wake before the GV2 UART starts, and driven LOW immediately before deep sleep after the UART is stopped and its RX/TX pins are set to input/high-Z.
 
+The modem mode controls how much of the SIM7080 is required for health:
+
+```json
+{
+  "modem": {
+    "mode": 1,
+    "apn": "internet.m2m",
+    "lookup_primary": "1.1.1.1",
+    "lookup_secondary": "8.8.8.8"
+  }
+}
+```
+
+| `modem.mode` | Behavior |
+| --- | --- |
+| `0` | No modem/SIM expected. Modem init, modem time, LTE-M validation, and GNSS probing through the modem are skipped. Modem health is ignored. |
+| `1` | Time-only modem mode. The modem must answer AT commands, register on the network, provide valid `AT+CCLK?` time, and set system time. LTE-M bearer validation is skipped. This is the default. |
+| `2` | LTE-M validation mode. The modem must answer AT commands, register, attach with the configured APN, obtain a non-zero local IP, and validate bearer/IP using the lookup hosts. Modem time and GNSS probing are also attempted. |
+
+`time.allow_gnss_fallback=true` lets mode `1` or `2` try GNSS time when modem network time is unavailable. GNSS time is only trusted from a valid GNSS position fix or from a plausible UTC value that advances during the probe.
+
 The web service is enabled as an access point by default. `mode` is `0` off, `1` WiFi station, or `2` access point:
 
 ```json
@@ -185,13 +212,18 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 ```json
 {
   "power": {
-    "log_interval_seconds": 60,
+    "log_interval_seconds": 900,
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6
+  },
+  "health": {
+    "led": 1
   }
 }
 ```
+
+`health.led` is `1` to blink the status LED with the health state, or `0` to keep that LED off.
 
 `deep_sleep` is a mode value:
 
@@ -203,7 +235,7 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 
 Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, powers down the GV2 through GPIO 43, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup.
 
-During POST, missing `/config.json` fields are added back to the SD card with defaults without overwriting existing values. That includes `power.deep_sleep*` fields. Legacy GV2 reset settings and old comment helper fields are removed when the config is rewritten.
+During POST, missing `/config.json` fields are added back to the SD card from `config.example.json` without overwriting existing values. Existing values and extra user fields are preserved.
 
 When enabled, open the IP printed as `WEB: ... ip=...` in the serial monitor. The page polls `/state.json` for inference metadata and fetches `/frame.jpg` only when a new verified frame id arrives, keeping the display path binary JPEG instead of base64. CRC-bad or structurally invalid JPEGs are logged but do not replace the last good web frame.
 
