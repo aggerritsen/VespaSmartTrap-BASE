@@ -113,7 +113,11 @@ static inline void wait_until(uint32_t target_us)
 
 static bool start_direction_is_clockwise()
 {
-    return strcmp(g_stepper_config.start_direction, "anti-clockwise") != 0;
+    return strcasecmp(g_stepper_config.start_direction, "anti-clockwise") != 0 &&
+           strcasecmp(g_stepper_config.start_direction, "anticlockwise") != 0 &&
+           strcasecmp(g_stepper_config.start_direction, "counter-clockwise") != 0 &&
+           strcasecmp(g_stepper_config.start_direction, "counterclockwise") != 0 &&
+           strcasecmp(g_stepper_config.start_direction, "ccw") != 0;
 }
 
 static void rotate_configured(bool forward, bool coast_after)

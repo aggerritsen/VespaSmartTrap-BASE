@@ -2,11 +2,11 @@
 #include <Arduino.h>
 
 struct StepperConfig {
-    uint16_t speed_steps_per_second = 200;
+    uint16_t speed_steps_per_second = 400;
     uint16_t rotation_degrees = 90;
     uint16_t steps_per_revolution = 2048;
     uint16_t reverse_wait_ms = 1000;
-    char start_direction[17] = "clockwise";
+    char start_direction[17] = "ccw";
 };
 
 struct UartConfig {
@@ -16,9 +16,9 @@ struct UartConfig {
 };
 
 struct InferenceConfig {
-    float confidence_threshold = 0.0f;
-    int16_t detected_class = -1;
-    uint16_t occurrence = 1;
+    float confidence_threshold = 0.89f;
+    int16_t detected_class = 3;
+    uint16_t occurrence = 3;
 };
 
 struct WebConfig {
@@ -62,7 +62,7 @@ struct HealthConfig {
 };
 
 struct BaseConfig {
-    char device_name[32] = "vst-base";
+    char device_name[32] = "vst-base-001";
     UartConfig uart;
     LoggingConfig logging;
     FeaturesConfig features;
