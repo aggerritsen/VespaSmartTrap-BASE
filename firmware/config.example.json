@@ -19,7 +19,7 @@
     "allow_gnss_fallback": true
   },
   "modem": {
-    "mode": 1,
+    "mode": 0,
     "apn": "internet.m2m",
     "lookup_primary": "1.1.1.1",
     "lookup_secondary": "8.8.8.8"

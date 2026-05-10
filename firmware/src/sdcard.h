@@ -51,7 +51,7 @@ struct TimeConfig {
 };
 
 struct ModemConfig {
-    uint8_t mode = 1; // 0=no modem, 1=time only, 2=LTE-M validated
+    uint8_t mode = 0; // 0=no modem, 1=time only, 2=LTE-M validated
     char apn[33] = "internet.m2m";
     char lookup_primary[16] = "1.1.1.1";
     char lookup_secondary[16] = "8.8.8.8";

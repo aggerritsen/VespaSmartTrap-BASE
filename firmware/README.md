@@ -178,7 +178,7 @@ The modem mode controls how much of the SIM7080 is required for health:
 ```json
 {
   "modem": {
-    "mode": 1,
+    "mode": 0,
     "apn": "internet.m2m",
     "lookup_primary": "1.1.1.1",
     "lookup_secondary": "8.8.8.8"
@@ -189,7 +189,7 @@ The modem mode controls how much of the SIM7080 is required for health:
 | `modem.mode` | Behavior |
 | --- | --- |
 | `0` | No modem/SIM expected. Modem init, modem time, LTE-M validation, and GNSS probing through the modem are skipped. Modem health is ignored. |
-| `1` | Time-only modem mode. The modem must answer AT commands, register on the network, provide valid `AT+CCLK?` time, and set system time. LTE-M bearer validation is skipped. This is the default. |
+| `1` | Time-only modem mode. The modem must answer AT commands, register on the network, provide valid `AT+CCLK?` time, and set system time. LTE-M bearer validation is skipped. |
 | `2` | LTE-M validation mode. The modem must answer AT commands, register, attach with the configured APN, obtain a non-zero local IP, and validate bearer/IP using the lookup hosts. Modem time and GNSS probing are also attempted. |
 
 `time.allow_gnss_fallback=true` lets mode `1` or `2` try GNSS time when modem network time is unavailable. GNSS time is only trusted from a valid GNSS position fix or from a plausible UTC value that advances during the probe.

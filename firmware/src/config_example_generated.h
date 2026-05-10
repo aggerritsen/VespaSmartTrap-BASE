@@ -24,7 +24,7 @@ static constexpr const char *CONFIG_EXAMPLE_JSON =
     "    \"allow_gnss_fallback\": true\n"
     "  },\n"
     "  \"modem\": {\n"
-    "    \"mode\": 1,\n"
+    "    \"mode\": 0,\n"
     "    \"apn\": \"internet.m2m\",\n"
     "    \"lookup_primary\": \"1.1.1.1\",\n"
     "    \"lookup_secondary\": \"8.8.8.8\"\n"
