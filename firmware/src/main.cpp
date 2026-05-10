@@ -94,6 +94,44 @@ static String current_time_text()
     return String(buf);
 }
 
+static bool format_current_time(char *buf, size_t len, const char *format)
+{
+    if (!buf || len == 0)
+        return false;
+
+    buf[0] = '\0';
+    if (!g_post.system_time)
+        return false;
+
+    time_t now = time(nullptr);
+    if (now <= 1700000000)
+        return false;
+
+    struct tm tm{};
+    if (!localtime_r(&now, &tm))
+        return false;
+
+    return strftime(buf, len, format, &tm) > 0;
+}
+
+static String current_timestamp_iso()
+{
+    char buf[32];
+    if (format_current_time(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S"))
+        return String(buf);
+
+    return String();
+}
+
+static String current_timestamp_compact()
+{
+    char buf[32];
+    if (format_current_time(buf, sizeof(buf), "%Y%m%d_%H%M%S"))
+        return String(buf);
+
+    return String();
+}
+
 static bool current_local_time(struct tm &tm)
 {
     if (!g_post.system_time)
@@ -876,10 +914,12 @@ static String make_health_log_line(uint32_t now,
 {
     String s;
     s.reserve(1500);
+    String timestamp_iso = current_timestamp_iso();
+    String timestamp_compact = current_timestamp_compact();
     s += "{";
     append_json_string(s, "type", "health");
     s += ",";
-    append_json_string(s, "timestamp", (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "");
+    append_json_string(s, "timestamp", timestamp_iso.c_str());
     s += ",\"uptime_ms\":";
     s += (unsigned long)now;
     s += ",";
@@ -929,7 +969,7 @@ static String make_health_log_line(uint32_t now,
     s += "},\"time\":{";
     append_json_bool(s, "system", g_post.system_time);
     s += ",";
-    append_json_string(s, "compact", (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "");
+    append_json_string(s, "compact", timestamp_compact.c_str());
     s += "},\"gnss\":{";
     append_json_bool(s, "ok", g_post.gnss_ready);
     s += ",";
@@ -1052,6 +1092,7 @@ static bool diagnose_and_print_health()
                   g_health.power_valid ? (unsigned)g_health.power.battery_mv : 0,
                   g_health.power_valid ? (unsigned)g_health.power.vbus_mv : 0);
 
+    String heartbeat_time = current_timestamp_compact();
     Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu gv2_heartbeats=%lu gv2_heartbeat_status=%u/%lu gv2_errors=%lu gv2_last_error=%u/%u heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s health=%s low_power=%s\n",
                   (unsigned long)now,
                   (unsigned long)uart_stats.bytes,
@@ -1065,7 +1106,7 @@ static bool diagnose_and_print_health()
                   (unsigned)uart_stats.last_error_detail,
                   ESP.getFreeHeap(),
                   modem_health_ok() ? "OK" : "NO",
-                  (g_post.modem_time || g_post.gnss_time) ? g_timestamp : "NO",
+                  heartbeat_time.length() > 0 ? heartbeat_time.c_str() : "NO",
                   g_post.gnss_ready ? "OK" : "NO",
                   g_post.gnss_fix ? "YES" : "NO",
                   g_post.gv2_uart ? "OK" : "NO",
