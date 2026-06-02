@@ -43,6 +43,8 @@ struct PowerConfig {
     uint8_t deep_sleep = 2;
     uint8_t deep_sleep_start_hour = 18;
     uint8_t deep_sleep_end_hour = 6;
+    char reboot_cron[64] = "";
+    bool reboot_after_deep_sleep_wakeup = false;
 };
 
 struct TimeConfig {
@@ -51,14 +53,31 @@ struct TimeConfig {
 };
 
 struct ModemConfig {
+    static constexpr uint8_t MAX_APN_CANDIDATES = 6;
+
+    struct ApnCandidate {
+        char supplier[33] = "";
+        char apn[33] = "";
+    };
+
     uint8_t mode = 0; // 0=no modem, 1=time only, 2=LTE-M validated
     char apn[33] = "internet.m2m";
+    bool apn_autodetect = true;
+    bool apn_test_all = false;
+    bool validate_http_egress = false;
+    bool operator_auto_select = false;
+    uint8_t apn_candidate_count = 0;
+    ApnCandidate apn_candidates[MAX_APN_CANDIDATES];
     char lookup_primary[16] = "1.1.1.1";
     char lookup_secondary[16] = "8.8.8.8";
 };
 
 struct HealthConfig {
     uint8_t led = 1; // 0=off, 1=blink health state on status LED
+};
+
+struct AzureConfig {
+    uint8_t max_uploads_per_boot = 3;
 };
 
 struct BaseConfig {
@@ -73,6 +92,7 @@ struct BaseConfig {
     TimeConfig time;
     ModemConfig modem;
     HealthConfig health;
+    AzureConfig azure;
 };
 
 bool sdcard_init();

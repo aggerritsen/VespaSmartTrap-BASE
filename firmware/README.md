@@ -131,10 +131,12 @@ The firmware writes:
 /config.json
 /post.log
 /frames.log
+/power.log
+/azure_queue.log
 /20260504_163530_000123.jpg
 ```
 
-`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `src/version.h`. `/frames.log` is appended as JSON Lines. JPEG filenames use the known system timestamp plus a local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
+`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `src/version.h`. `/frames.log` and `/power.log` are appended as JSON Lines. `/azure_queue.log` stores saved-image upload candidates until the next POST upload window, then is cleared after the configured drain pass. JPEG filenames use the known system timestamp plus a local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
 
 The repository includes `config.example.json` as a clean, human-readable baseline for validating SD card configs. It intentionally contains no comment helper fields and no legacy GV2 reset settings.
 
@@ -178,8 +180,18 @@ The modem mode controls how much of the SIM7080 is required for health:
 ```json
 {
   "modem": {
-    "mode": 0,
-    "apn": "internet.m2m",
+    "mode": 2,
+    "apn": "onomondo",
+    "apn_autodetect": true,
+    "apn_test_all": false,
+    "operator_auto_select": false,
+    "apn_candidates": [
+      { "supplier": "Onomondo", "apn": "onomondo" },
+      { "supplier": "KPNThings", "apn": "internet.m2m" },
+      { "supplier": "Wireless Logic Benelux", "apn": "" },
+      { "supplier": "ThingsData/Tele2 2G-4G", "apn": "m2m.tele2.com" },
+      { "supplier": "ThingsData/Tele2 5G", "apn": "iot.tele2.com" }
+    ],
     "lookup_primary": "1.1.1.1",
     "lookup_secondary": "8.8.8.8"
   }
@@ -190,7 +202,15 @@ The modem mode controls how much of the SIM7080 is required for health:
 | --- | --- |
 | `0` | No modem/SIM expected. Modem init, modem time, LTE-M validation, and GNSS probing through the modem are skipped. Modem health is ignored. |
 | `1` | Time-only modem mode. The modem must answer AT commands, register on the network, provide valid `AT+CCLK?` time, and set system time. LTE-M bearer validation is skipped. |
-| `2` | LTE-M validation mode. The modem must answer AT commands, register, attach with the configured APN, obtain a non-zero local IP, and validate bearer/IP using the lookup hosts. Modem time and GNSS probing are also attempted. |
+| `2` | LTE-M validation mode. The modem must answer AT commands, register, attach with the configured APN, and obtain a bearer IP address. Modem time and GNSS probing are also attempted. |
+
+When `apn_autodetect` is `true`, mode `2` tries each non-empty `apn_candidates` entry until LTE-M bearer/IP validation succeeds. By default validation stops at bearer/IP because SIM7080 TLS response timing is too variable for a reliable POST egress check. Set `validate_http_egress` to `true` only during modem diagnostics if a TinyGSM TLS connection to KPN Things should also be attempted. Each APN attempt is printed to serial and appended to `/health.log` as `modem_apn_probe` JSON Lines. The selected APN is kept in RAM as `modem.apn` for later health retries. Leave a supplier APN empty when it is not known yet; the firmware logs that candidate as skipped.
+
+Set `apn_test_all` to `true` during supplier comparison tests to continue through every configured APN even after one APN passes. The first passing APN remains selected for later health retries.
+
+For SIM supplier testing, use a longer `time.network_timeout_seconds` value such as `60` so roaming SIMs have enough time to leave `searching` registration states like `+CEREG: 2,2` before APN attach is declared failed.
+
+When `azure.max_uploads_per_boot` is greater than `0`, a detection-matched GV2 JPEG that is successfully saved to the SD card is queued for Azure Blob Storage upload using the credentials compiled in `config_secrets.h`. Runtime upload is deliberately deferred because GV2 continuously streams UART data and SIM7080 TLS connect can block for a long time. The queue is stored in `/azure_queue.log`; during the next POST, before GV2 UART starts, the firmware uploads at most `azure.max_uploads_per_boot` queued files and then clears the whole queue log. Failed entries and entries beyond the configured limit are intentionally discarded when the log is cleared. Set `azure.max_uploads_per_boot` to `0` to disable both runtime queueing and boot-time queued uploads.
 
 `time.allow_gnss_fallback=true` lets mode `1` or `2` try GNSS time when modem network time is unavailable. GNSS time is only trusted from a valid GNSS position fix or from a plausible UTC value that advances during the probe.
 
@@ -215,10 +235,15 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
     "log_interval_seconds": 900,
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
-    "deep_sleep_end_hour": 6
+    "deep_sleep_end_hour": 6,
+    "reboot_cron": "0 12 * * *",
+    "reboot_after_deep_sleep_wakeup": false
   },
   "health": {
     "led": 1
+  },
+  "azure": {
+    "max_uploads_per_boot": 3
   }
 }
 ```
@@ -233,7 +258,11 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 | `1` | Sleep during the configured local-time window |
 | `2` | Sleep during the configured local-time window only when running from battery |
 
-Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, powers down the GV2 through GPIO 43, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup.
+Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, stops the GV2 UART, drives the future GV2 power-control signal on GPIO 43 LOW, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup. On the current hardware GPIO 43 does not physically power-cycle GV2.
+
+`power.reboot_cron` is a five-field cron-like schedule checked once per loop minute after valid system time is available. It supports `*`, single values, comma lists, ranges, and `*/step`. For example, `"0 12 * * *"` reboots daily at noon. Leave it empty to disable scheduled reboot. `power.reboot_after_deep_sleep_wakeup=true` performs one immediate restart after waking from a firmware-entered deep sleep, then clears the RTC marker to avoid a reboot loop.
+
+`azure.max_uploads_per_boot` is the single Azure upload switch and limit. `0` disables runtime queueing and boot-time queued uploads. Any value from `1` to `20` queues saved detection images and uploads at most that many during the next POST upload window. Whenever the POST drain pass runs, `/azure_queue.log` is cleared completely afterward, including failed entries and entries beyond the configured upload limit.
 
 During POST, missing `/config.json` fields are added back to the SD card from `config.example.json` without overwriting existing values. Existing values and extra user fields are preserved.
 

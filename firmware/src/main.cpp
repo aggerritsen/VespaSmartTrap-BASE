@@ -3,6 +3,9 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <FS.h>
+#include <SD_MMC.h>
+
 #include "esp_sleep.h"
 #include "esp_system.h"
 
@@ -15,12 +18,18 @@
 #include "web.h"
 
 static char g_timestamp[32] = {0};
+static constexpr const char *AZURE_QUEUE_PATH = "/azure_queue.log";
+static constexpr const char *AZURE_QUEUE_WORK_PATH = "/azure_queue.work";
+static constexpr const char *AZURE_QUEUE_TMP_PATH = "/azure_queue.tmp";
+RTC_DATA_ATTR static uint32_t g_deep_sleep_reboot_marker = 0;
+static constexpr uint32_t DEEP_SLEEP_REBOOT_MARKER = 0x44535242UL; // DSRB
 
 struct PostResult {
     bool modem_ready = false;
     bool modem_network = false;
     bool modem_ltem = false;
     bool modem_http = false;
+    bool azure_upload = false;
     bool modem_time = false;
     bool gnss_time = false;
     bool system_time = false;
@@ -238,6 +247,7 @@ static void enter_deep_sleep_until(uint32_t sleep_seconds)
                                       String("\"}\n"));
     gv2_prepare_for_sleep(g_config.uart);
     modem_prepare_for_sleep();
+    g_deep_sleep_reboot_marker = DEEP_SLEEP_REBOOT_MARKER;
     Serial.flush();
     esp_sleep_enable_timer_wakeup((uint64_t)sleep_seconds * 1000000ULL);
     esp_deep_sleep_start();
@@ -384,11 +394,32 @@ static String make_post_summary_text()
     s += "modem_apn=";
     s += g_config.modem.apn;
     s += "\n";
+    s += "modem_apn_autodetect=";
+    s += g_config.modem.apn_autodetect ? "YES" : "NO";
+    s += "\n";
+    s += "modem_apn_test_all=";
+    s += g_config.modem.apn_test_all ? "YES" : "NO";
+    s += "\n";
+    s += "modem_validate_http_egress=";
+    s += g_config.modem.validate_http_egress ? "YES" : "NO";
+    s += "\n";
+    s += "modem_operator_auto_select=";
+    s += g_config.modem.operator_auto_select ? "YES" : "NO";
+    s += "\n";
+    s += "modem_apn_candidates=";
+    s += g_config.modem.apn_candidate_count;
+    s += "\n";
     s += "modem_ltem=";
     s += g_post.modem_ltem ? "PASS" : (g_config.modem.mode == 2 ? "FAIL" : "SKIPPED");
     s += "\n";
-    s += "modem_http_world_clock=";
-    s += g_post.modem_http ? "PASS" : (g_config.modem.mode == 2 ? "FAIL" : "SKIPPED");
+    s += "modem_http_egress=";
+    if (g_config.modem.mode != 2 || !g_config.modem.validate_http_egress)
+        s += "SKIPPED";
+    else
+        s += g_post.modem_http ? "PASS" : "FAIL";
+    s += "\n";
+    s += "azure_upload=";
+    s += g_config.modem.mode == 2 ? "PROBE_DISABLED" : "SKIPPED";
     s += "\n";
     s += "modem_lookup_primary=";
     s += g_config.modem.lookup_primary;
@@ -510,6 +541,15 @@ static String make_post_summary_text()
         s += "0";
     s += g_config.power.deep_sleep_end_hour;
     s += ":00\n";
+    s += "power_reboot_cron=";
+    s += g_config.power.reboot_cron[0] ? g_config.power.reboot_cron : "-";
+    s += "\n";
+    s += "power_reboot_after_deep_sleep_wakeup=";
+    s += g_config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO";
+    s += "\n";
+    s += "azure_max_uploads_per_boot=";
+    s += g_config.azure.max_uploads_per_boot;
+    s += "\n";
     s += "==================================================\n\n";
 
     return s;
@@ -564,15 +604,25 @@ static void print_post_summary()
     Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
     Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
     Serial.printf("POST: health_led       [%u]\n", g_config.health.led);
-    Serial.printf("POST: modem_mode      [%u] apn=[%s] lookup=[%s,%s]\n",
+    Serial.printf("POST: modem_mode      [%u] apn=[%s] apn_autodetect=[%s] apn_test_all=[%s] validate_http_egress=[%s] operator_auto_select=[%s] candidates=[%u] lookup=[%s,%s]\n",
                   g_config.modem.mode,
                   g_config.modem.apn,
+                  g_config.modem.apn_autodetect ? "YES" : "NO",
+                  g_config.modem.apn_test_all ? "YES" : "NO",
+                  g_config.modem.validate_http_egress ? "YES" : "NO",
+                  g_config.modem.operator_auto_select ? "YES" : "NO",
+                  g_config.modem.apn_candidate_count,
                   g_config.modem.lookup_primary,
                   g_config.modem.lookup_secondary);
     Serial.printf("POST: deep_sleep       [%u %02u:00-%02u:00]\n",
                   g_config.power.deep_sleep,
                   g_config.power.deep_sleep_start_hour,
                   g_config.power.deep_sleep_end_hour);
+    Serial.printf("POST: reboot_schedule  [cron=%s after_deep_sleep=%s]\n",
+                  g_config.power.reboot_cron[0] ? g_config.power.reboot_cron : "-",
+                  g_config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO");
+    Serial.printf("POST: azure_uploads    [max_per_boot=%u]\n",
+                  g_config.azure.max_uploads_per_boot);
     Serial.printf("POST: inference_filter  [class=%d confidence>=%.3f occurrence=%u]\n",
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
@@ -582,8 +632,14 @@ static void print_post_summary()
         print_post_line("modem_ltem", g_post.modem_ltem, g_post.modem_ltem ? "bearer/ip validated" : "attach failed");
     else
         print_post_warn("modem_ltem", g_config.modem.mode == 0 ? "skipped mode=0" : "skipped mode=1");
+    if (g_config.modem.mode == 2) {
+        if (g_config.modem.validate_http_egress)
+            print_post_line("http_egress", g_post.modem_http, g_post.modem_http ? "kpnthings TLS OK" : "kpnthings TLS failed");
+        else
+            print_post_warn("http_egress", "skipped by config");
+    }
     if (g_config.modem.mode == 2)
-        print_post_line("modem_http", g_post.modem_http, g_post.modem_http ? "world clock OK" : "world clock failed");
+        print_post_warn("azure_upload", "post probe disabled");
     print_post_line("modem_timestamp", g_post.modem_time, g_post.modem_time ? g_timestamp : "no valid network time");
     print_post_line("gnss_timestamp", g_post.gnss_time, g_post.gnss_time ? g_timestamp : "unavailable");
     print_post_line("system_time", g_post.system_time);
@@ -688,6 +744,249 @@ static bool set_system_time_from_timestamp(const char *ts)
     Serial.println(buf);
 
     return true;
+}
+
+static bool parse_azure_queue_line(const String &line, String &local_path, String &blob_name)
+{
+    int first = line.indexOf(',');
+    int second = first >= 0 ? line.indexOf(',', first + 1) : -1;
+    if (first < 0 || second < 0)
+        return false;
+
+    local_path = line.substring(first + 1, second);
+    blob_name = line.substring(second + 1);
+    local_path.trim();
+    blob_name.trim();
+    return local_path.length() > 0 && blob_name.length() > 0;
+}
+
+static uint8_t drain_azure_upload_queue()
+{
+    if (!SD_MMC.exists(AZURE_QUEUE_PATH))
+        return 0;
+
+    SD_MMC.remove(AZURE_QUEUE_WORK_PATH);
+    SD_MMC.remove(AZURE_QUEUE_TMP_PATH);
+    if (!SD_MMC.rename(AZURE_QUEUE_PATH, AZURE_QUEUE_WORK_PATH)) {
+        Serial.printf("AZURE QUEUE: rename failed %s -> %s\n", AZURE_QUEUE_PATH, AZURE_QUEUE_WORK_PATH);
+        return 0;
+    }
+
+    File work = SD_MMC.open(AZURE_QUEUE_WORK_PATH, "r");
+    if (!work) {
+        Serial.printf("AZURE QUEUE: open failed path=%s\n", AZURE_QUEUE_WORK_PATH);
+        SD_MMC.rename(AZURE_QUEUE_WORK_PATH, AZURE_QUEUE_PATH);
+        return 0;
+    }
+
+    uint8_t uploaded = 0;
+    uint16_t discarded = 0;
+    uint16_t malformed = 0;
+    uint8_t max_uploads = g_config.azure.max_uploads_per_boot;
+    Serial.printf("AZURE QUEUE: drain begin max=%u clear_after=YES\n", (unsigned)max_uploads);
+
+    while (work.available()) {
+        String line = work.readStringUntil('\n');
+        line.trim();
+        if (!line.length())
+            continue;
+
+        if (uploaded >= max_uploads) {
+            discarded++;
+            continue;
+        }
+
+        String local_path;
+        String blob_name;
+        if (!parse_azure_queue_line(line, local_path, blob_name)) {
+            malformed++;
+            Serial.printf("AZURE QUEUE: malformed line skipped len=%u\n", (unsigned)line.length());
+            continue;
+        }
+
+        Serial.printf("AZURE QUEUE: upload begin local=%s blob=%s\n",
+                      local_path.c_str(),
+                      blob_name.c_str());
+        bool ok = modem_upload_azure_blob_from_sd(local_path.c_str(),
+                                                  blob_name.c_str(),
+                                                  g_config.modem.apn,
+                                                  10000);
+        Serial.printf("AZURE QUEUE: upload %s local=%s blob=%s\n",
+                      ok ? "PASS" : "FAIL",
+                      local_path.c_str(),
+                      blob_name.c_str());
+        if (ok) {
+            uploaded++;
+        } else {
+            discarded++;
+        }
+    }
+
+    work.close();
+    SD_MMC.remove(AZURE_QUEUE_WORK_PATH);
+    SD_MMC.remove(AZURE_QUEUE_TMP_PATH);
+    SD_MMC.remove(AZURE_QUEUE_PATH);
+    Serial.printf("AZURE QUEUE: upload log cleared path=%s\n", AZURE_QUEUE_PATH);
+
+    Serial.printf("AZURE QUEUE: drain done uploaded=%u discarded=%u malformed=%u\n",
+                  (unsigned)uploaded,
+                  (unsigned)discarded,
+                  (unsigned)malformed);
+    return uploaded;
+}
+
+static bool cron_field_is_wildcard(const char *field)
+{
+    return !field || strcmp(field, "*") == 0;
+}
+
+static bool parse_uint_token(const char *s, int &out)
+{
+    if (!s || !s[0])
+        return false;
+
+    int value = 0;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9')
+            return false;
+        value = value * 10 + (*p - '0');
+        if (value > 10000)
+            return false;
+    }
+    out = value;
+    return true;
+}
+
+static bool cron_single_part_matches(const char *part, int value, int min_value, int max_value, bool day_of_week)
+{
+    if (!part || !part[0])
+        return false;
+
+    if (strcmp(part, "*") == 0)
+        return true;
+
+    if (part[0] == '*' && part[1] == '/') {
+        int step = 0;
+        if (!parse_uint_token(part + 2, step) || step <= 0)
+            return false;
+        return (value - min_value) % step == 0;
+    }
+
+    const char *dash = strchr(part, '-');
+    if (dash) {
+        char left[8] = {0};
+        char right[8] = {0};
+        size_t left_len = min<size_t>((size_t)(dash - part), sizeof(left) - 1);
+        strlcpy(left, part, left_len + 1);
+        strlcpy(right, dash + 1, sizeof(right));
+
+        int start = 0;
+        int end = 0;
+        if (!parse_uint_token(left, start) || !parse_uint_token(right, end))
+            return false;
+        if (day_of_week && start == 7)
+            start = 0;
+        if (day_of_week && end == 7)
+            end = 0;
+        if (start < min_value || start > max_value || end < min_value || end > max_value)
+            return false;
+        if (start <= end)
+            return value >= start && value <= end;
+        return value >= start || value <= end;
+    }
+
+    int expected = 0;
+    if (!parse_uint_token(part, expected))
+        return false;
+    if (day_of_week && expected == 7)
+        expected = 0;
+    return expected >= min_value && expected <= max_value && value == expected;
+}
+
+static bool cron_field_matches(const char *field, int value, int min_value, int max_value, bool day_of_week = false)
+{
+    if (!field || !field[0])
+        return false;
+
+    char copy[64] = {0};
+    strlcpy(copy, field, sizeof(copy));
+    char *ctx = nullptr;
+    for (char *part = strtok_r(copy, ",", &ctx); part; part = strtok_r(nullptr, ",", &ctx)) {
+        if (cron_single_part_matches(part, value, min_value, max_value, day_of_week))
+            return true;
+    }
+    return false;
+}
+
+static bool cron_schedule_matches_now(const char *expr, const struct tm &tm)
+{
+    if (!expr || !expr[0])
+        return false;
+
+    char copy[96] = {0};
+    strlcpy(copy, expr, sizeof(copy));
+    char *fields[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    char *ctx = nullptr;
+    uint8_t count = 0;
+    for (char *token = strtok_r(copy, " \t", &ctx); token && count < 5; token = strtok_r(nullptr, " \t", &ctx))
+        fields[count++] = token;
+    if (count != 5)
+        return false;
+
+    bool minute = cron_field_matches(fields[0], tm.tm_min, 0, 59);
+    bool hour = cron_field_matches(fields[1], tm.tm_hour, 0, 23);
+    bool month = cron_field_matches(fields[3], tm.tm_mon + 1, 1, 12);
+    bool dom_wild = cron_field_is_wildcard(fields[2]);
+    bool dow_wild = cron_field_is_wildcard(fields[4]);
+    bool dom = cron_field_matches(fields[2], tm.tm_mday, 1, 31);
+    bool dow = cron_field_matches(fields[4], tm.tm_wday, 0, 7, true);
+    bool day = (!dom_wild && !dow_wild) ? (dom || dow) : (dom && dow);
+
+    return minute && hour && month && day;
+}
+
+static void reboot_now(const char *reason)
+{
+    Serial.printf("POWER: reboot requested reason=%s\n", reason ? reason : "unknown");
+    sdcard_append_log("/power.log", String("{\"event\":\"reboot\",\"reason\":\"") +
+                                      String(reason ? reason : "unknown") +
+                                      String("\"}\n"));
+    Serial.flush();
+    delay(100);
+    ESP.restart();
+}
+
+static void reboot_after_deep_sleep_wakeup_if_configured()
+{
+    if (!g_config.power.reboot_after_deep_sleep_wakeup)
+        return;
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP)
+        return;
+    if (g_deep_sleep_reboot_marker != DEEP_SLEEP_REBOOT_MARKER)
+        return;
+
+    g_deep_sleep_reboot_marker = 0;
+    reboot_now("after_deep_sleep_wakeup");
+}
+
+static void reboot_if_cron_matches()
+{
+    if (!g_config.power.reboot_cron[0])
+        return;
+
+    struct tm tm{};
+    if (!current_local_time(tm))
+        return;
+
+    static int last_reboot_minute_key = -1;
+    int minute_key = tm.tm_yday * 24 * 60 + tm.tm_hour * 60 + tm.tm_min;
+    if (minute_key == last_reboot_minute_key)
+        return;
+
+    if (cron_schedule_matches_now(g_config.power.reboot_cron, tm)) {
+        last_reboot_minute_key = minute_key;
+        reboot_now("scheduled_cron");
+    }
 }
 
 static bool gnss_utc_to_timestamp(const char *utc, char *out, size_t out_len)
@@ -822,7 +1121,7 @@ static void refresh_modem_health()
 
     if (!g_post.modem_ready) {
         Serial.println("MODEM: health recovery init begin");
-        g_post.modem_ready = modem_init_early();
+        g_post.modem_ready = modem_init_early(g_config.modem.operator_auto_select);
         if (!g_post.modem_ready)
             return;
     }
@@ -834,6 +1133,15 @@ static void refresh_modem_health()
     bool registered = modem_check_network_registered(min<uint32_t>(network_timeout_ms, 5000UL));
     if (!registered) {
         Serial.println("MODEM: health network registration timeout");
+        if (!modem_at_responsive(1000)) {
+            Serial.println("MODEM: health modem unresponsive; skipping detailed diagnostics and GNSS fallback");
+            g_post.modem_ready = false;
+            g_post.modem_network = false;
+            g_post.modem_ltem = false;
+            g_post.modem_time = false;
+            return;
+        }
+
         modem_print_sim_network_status();
         if (g_post.modem_network) {
             Serial.println("MODEM: health network registration LOST");
@@ -862,10 +1170,8 @@ static void refresh_modem_health()
         }
     } else if (g_config.modem.mode == 2 && !g_post.modem_ltem) {
         Serial.println("MODEM: health LTE-M retry begin");
-        g_post.modem_ltem = modem_validate_ltem(g_config.modem.apn,
-                                                g_config.modem.lookup_primary,
-                                                g_config.modem.lookup_secondary,
-                                                network_timeout_ms);
+        g_post.modem_ltem = modem_validate_ltem_apn_candidates(g_config.modem,
+                                                               network_timeout_ms);
     }
 
     if (!g_post.system_time)
@@ -1002,9 +1308,7 @@ static String make_health_log_line(uint32_t now,
 
 static bool diagnose_and_print_health()
 {
-    static bool serial_post_copy_printed = false;
     static uint32_t last_ms = 0;
-    static uint32_t diagnosis_count = 0;
     uint32_t now = millis();
     constexpr uint32_t interval_ms = 60000UL;
 
@@ -1017,15 +1321,6 @@ static bool diagnose_and_print_health()
         return false;
 
     last_ms = now;
-    diagnosis_count++;
-
-    if (!serial_post_copy_printed && diagnosis_count > 1) {
-        serial_post_copy_printed = true;
-        Serial.println();
-        Serial.println("POST MONITOR COPY: delayed once so COM5 can attach");
-        print_system_info();
-        print_post_summary();
-    }
 
     const Gv2UartStats &uart_stats = gv2_uart_stats();
     uint32_t delta_bytes = uart_stats.bytes - g_health.last_bytes;
@@ -1174,9 +1469,8 @@ static void poll_status_led()
 void setup()
 {
     Serial.begin(115200);
-    wait_for_serial(5000);
-    delay(100);
-    gv2_power_on();
+    wait_for_serial(8000);
+    delay(2000);
 
     print_system_info();
 
@@ -1187,6 +1481,7 @@ void setup()
     print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
     bool config_loaded = sdcard_load_config(g_config);
     print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
+    reboot_after_deep_sleep_wakeup_if_configured();
 
     if (g_config.modem.mode == 0) {
         Serial.println("POST: modem skipped by config mode=0 (no SIM/no modem)");
@@ -1195,24 +1490,29 @@ void setup()
         print_post_warn("gnss_command", "skipped mode=0");
     } else {
         Serial.printf("POST: modem init begin mode=%u\n", g_config.modem.mode);
+        if (g_config.modem.mode == 1 && g_config.modem.apn_autodetect) {
+            Serial.println("POST: APN autodetect skipped in modem mode=1; set modem.mode=2 for LTE-M/APN probing");
+            sdcard_append_log("/health.log", "{\"type\":\"modem_apn_probe\",\"event\":\"skipped\",\"result\":\"skipped\",\"detail\":\"mode_1_time_only_set_mode_2_for_apn_probe\"}\n");
+        }
     }
 
-    if (g_config.modem.mode != 0 && modem_init_early()) {
+    if (g_config.modem.mode != 0 && modem_init_early(g_config.modem.operator_auto_select)) {
         g_post.modem_ready = true;
         print_post_line("modem_at", true);
 
         uint32_t network_timeout_ms = (uint32_t)g_config.time.network_timeout_seconds * 1000UL;
         if (g_config.modem.mode == 2) {
             Serial.println("POST: LTE-M validation begin");
-            g_post.modem_ltem = modem_validate_ltem(g_config.modem.apn,
-                                                    g_config.modem.lookup_primary,
-                                                    g_config.modem.lookup_secondary,
-                                                    network_timeout_ms);
+            g_post.modem_ltem = modem_validate_ltem_apn_candidates(g_config.modem,
+                                                                   network_timeout_ms);
             g_post.modem_network = g_post.modem_ltem;
             print_post_line("modem_ltem", g_post.modem_ltem, g_post.modem_ltem ? "bearer/ip validated" : "attach failed");
             if (g_post.modem_ltem) {
-                g_post.modem_http = modem_test_world_clock();
-                print_post_line("modem_http", g_post.modem_http, g_post.modem_http ? "world clock OK" : "world clock failed");
+                g_post.modem_http = g_config.modem.validate_http_egress;
+                if (g_config.modem.validate_http_egress)
+                    print_post_line("http_egress", true, "validated during LTE-M probe");
+                else
+                    print_post_warn("http_egress", "skipped by config");
             }
         }
 
@@ -1225,6 +1525,15 @@ void setup()
             print_post_line("system_time", g_post.system_time);
         } else {
             print_post_line("modem_timestamp", false, "unavailable");
+        }
+
+        if (g_config.modem.mode == 2)
+            print_post_warn("azure_upload", g_post.modem_ltem ? "post probe disabled" : "skipped; LTE-M unavailable");
+
+        if (g_config.modem.mode == 2 && g_post.modem_ltem) {
+            uint8_t uploaded = drain_azure_upload_queue();
+            if (uploaded > 0)
+                Serial.printf("POST: azure_queue uploaded=%u\n", (unsigned)uploaded);
         }
 
         bool should_probe_gnss = g_config.features.gnss_probe &&
@@ -1272,6 +1581,7 @@ void setup()
     stepper_init(g_config.stepper);
     stepper_run_post_test_cycle();
 
+    gv2_power_on();
     g_post.gv2_uart = gv2_uart_init(g_config.uart);
     gv2_uart_set_log_context(&g_config, &g_gnss);
     print_post_line("gv2_uart", g_post.gv2_uart);
@@ -1286,6 +1596,7 @@ void setup()
 void loop()
 {
     sleep_if_in_configured_window("loop");
+    reboot_if_cron_matches();
     gv2_uart_poll();
     web_loop();
     poll_status_led();

@@ -13,6 +13,7 @@ The current base firmware provides the following operational features:
 - Power-on self test (POST) covering CPU, flash, heap, PSRAM, reset reason, SD card, configuration, modem, GNSS command path, UART, power telemetry, and actuator readiness.
 - SD-MMC storage for configuration, boot reports, frame logs, power logs, and selected JPEG captures.
 - SIM7080 modem initialization using TinyGSM, including AT readiness checks and network-time acquisition.
+- Azure Blob upload of saved detection images through a boot-time deferred queue.
 - GNSS probing through the SIM7080 command interface, with optional GNSS UTC fallback when network time is unavailable and a trusted position is present.
 - Binary UART receiver for the Grove Vision AI V2 module using `VSTS` state frames and `VSTJ` JPEG frames with metadata and CRC32 validation.
 - Inference filtering by class, confidence threshold, and consecutive occurrence count before actuation and image persistence.
@@ -148,6 +149,7 @@ The firmware creates or writes these files on the SD card:
 /post.log                     Boot POST summary, overwritten each boot
 /frames.log                   JSON Lines frame and detection log
 /power.log                    JSON Lines power telemetry log
+/azure_queue.log              Deferred Azure upload queue, cleared after POST drain
 /YYYYMMDD_HHMMSS_000123.jpg   Saved detection JPEGs when time is known
 /uptime_0000000000_000123.jpg Fallback JPEG naming when time is unavailable
 ```
@@ -182,7 +184,12 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
     "occurrence": 3
   },
   "power": {
-    "log_interval_seconds": 60
+    "log_interval_seconds": 60,
+    "reboot_cron": "0 12 * * *",
+    "reboot_after_deep_sleep_wakeup": false
+  },
+  "azure": {
+    "max_uploads_per_boot": 3
   },
   "web": {
     "mode": 2,

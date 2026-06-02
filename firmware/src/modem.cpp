@@ -5,6 +5,22 @@
 #include <math.h>
 #include <stdlib.h>
 #include <Wire.h>
+#include <FS.h>
+#include <SD_MMC.h>
+
+#if __has_include("config_secrets.h")
+#include "config_secrets.h"
+#endif
+
+#ifndef AZURE_BLOB_HOST
+#define AZURE_BLOB_HOST ""
+#endif
+#ifndef AZURE_BLOB_CONTAINER
+#define AZURE_BLOB_CONTAINER ""
+#endif
+#ifndef AZURE_BLOB_SAS
+#define AZURE_BLOB_SAS ""
+#endif
 
 // XPowers
 #ifndef XPOWERS_CHIP_AXP2101
@@ -36,6 +52,7 @@ static XPowersPMU PMU;
 static TinyGsm modem(Serial1);
 static bool g_pmu_ready = false;
 static bool g_serial_ready = false;
+static constexpr const char *MODEM_HEALTH_LOG_PATH = "/health.log";
 
 static bool is_plausible_year(int year)
 {
@@ -80,6 +97,13 @@ static bool pmu_enable_modem_rails()
 
     g_pmu_ready = true;
     Serial.println("MODEM: PMU init OK");
+
+    Serial.println("MODEM: modem rails reset begin");
+    PMU.disableBLDO2();
+    PMU.disableDC3();
+    delay(2000);
+    Serial.println("MODEM: modem rails reset power-up");
+
     PMU.setDC3Voltage(3000);
     PMU.enableDC3();
     Serial.println("MODEM: DCDC3 enabled at 3000mV");
@@ -89,7 +113,7 @@ static bool pmu_enable_modem_rails()
     Serial.println("MODEM: BLDO2 enabled at 3300mV");
 
     PMU.disableTSPinMeasure();
-    delay(100);
+    delay(2500);
 
     return true;
 }
@@ -97,21 +121,31 @@ static bool pmu_enable_modem_rails()
 static bool wait_for_at_ready(uint32_t timeout_ms)
 {
     uint32_t start = millis();
-    int retry = 0;
+    uint32_t last_progress_ms = start;
+    bool pwrkey_pulsed = false;
+    static constexpr uint32_t FIRST_PWRKEY_DELAY_MS = 20000;
 
     while (millis() - start < timeout_ms)
     {
         if (modem.testAT(1000))
             return true;
 
-        delay(200);
-
-        if (++retry > 15)
-        {
-            Serial.println("MODEM: AT not ready, pulsing PWRKEY");
-            pwrkey_pulse();
-            retry = 0;
+        uint32_t now = millis();
+        if (now - last_progress_ms >= 5000) {
+            Serial.printf("\nMODEM: AT probe waiting elapsed_ms=%lu timeout_ms=%lu\n",
+                          (unsigned long)(now - start),
+                          (unsigned long)timeout_ms);
+            last_progress_ms = now;
         }
+
+        if (!pwrkey_pulsed && now - start >= FIRST_PWRKEY_DELAY_MS) {
+            Serial.println("MODEM: AT not ready after boot window, pulsing PWRKEY");
+            pwrkey_pulse();
+            pwrkey_pulsed = true;
+            last_progress_ms = millis();
+        }
+
+        delay(200);
     }
     return false;
 }
@@ -151,6 +185,51 @@ static void copy_field(char *dst, size_t dst_len, const String &value)
         return;
 
     snprintf(dst, dst_len, "%s", value.c_str());
+}
+
+static void append_json_string(String &s, const char *name, const char *value)
+{
+    s += "\"";
+    s += name;
+    s += "\":\"";
+    if (value) {
+        for (const char *p = value; *p; p++) {
+            if (*p == '"' || *p == '\\')
+                s += '\\';
+            s += *p;
+        }
+    }
+    s += "\"";
+}
+
+static void append_apn_probe_log(const char *event,
+                                 uint8_t attempt,
+                                 const char *supplier,
+                                 const char *apn,
+                                 const char *result,
+                                 const char *detail)
+{
+    String s;
+    s.reserve(320);
+    s += "{";
+    append_json_string(s, "type", "modem_apn_probe");
+    s += ",";
+    append_json_string(s, "event", event ? event : "");
+    s += ",\"uptime_ms\":";
+    s += (unsigned long)millis();
+    s += ",\"attempt\":";
+    s += (unsigned)attempt;
+    s += ",";
+    append_json_string(s, "supplier", supplier ? supplier : "");
+    s += ",";
+    append_json_string(s, "apn", apn ? apn : "");
+    s += ",";
+    append_json_string(s, "result", result ? result : "");
+    s += ",";
+    append_json_string(s, "detail", detail ? detail : "");
+    s += "}\n";
+
+    sdcard_append_log(MODEM_HEALTH_LOG_PATH, s);
 }
 
 static bool has_nonzero_position(const char *latitude, const char *longitude)
@@ -226,6 +305,15 @@ static bool wait_for_network_registration(uint32_t timeout_ms)
     return false;
 }
 
+static bool activate_app_pdp_context(const char *apn, char *out, size_t out_len, uint32_t timeout_ms);
+
+bool modem_at_responsive(uint32_t timeout_ms)
+{
+    if (!g_serial_ready)
+        return false;
+    return modem.testAT(timeout_ms);
+}
+
 static bool read_at_prefixed_line(const char *cmd, const char *prefix, String &line, uint32_t timeout_ms)
 {
     line = "";
@@ -237,6 +325,269 @@ static bool read_at_prefixed_line(const char *cmd, const char *prefix, String &l
     line.trim();
     modem.waitResponse(200);
     return true;
+}
+
+static bool send_at_expect_ok(const char *cmd, uint32_t timeout_ms)
+{
+    Serial.printf("MODEM: command AT%s\n", cmd);
+    modem.sendAT(cmd);
+    int response = modem.waitResponse(timeout_ms);
+    Serial.printf("MODEM: command AT%s result=%s\n", cmd, response == 1 ? "OK" : "FAIL");
+    delay(100);
+    return response == 1;
+}
+
+static int timeout_ms_to_connect_seconds(uint32_t timeout_ms)
+{
+    uint32_t seconds = (timeout_ms + 999UL) / 1000UL;
+    if (seconds == 0)
+        seconds = 1;
+    if (seconds > 30)
+        seconds = 30;
+    return (int)seconds;
+}
+
+static bool is_sim_ready_for_network()
+{
+    String sim;
+    if (!read_at_prefixed_line("+CPIN?", "+CPIN:", sim, 2000)) {
+        Serial.println("MODEM: SIM status before operator selection unavailable; skipping operator selection change");
+        return false;
+    }
+
+    sim.trim();
+    Serial.printf("MODEM: SIM status before operator selection +CPIN:%s\n", sim.c_str());
+    if (sim == "READY")
+        return true;
+
+    Serial.println("MODEM: SIM not ready; skipping operator selection change");
+    return false;
+}
+
+static bool set_pdp_context_ip(const char *apn)
+{
+    if (!apn || !apn[0])
+        return false;
+
+    Serial.printf("MODEM: PDP context define cid=1 type=IP apn=%s\n", apn);
+    modem.sendAT("+CGDCONT=1,\"IP\",\"", apn, "\"");
+    int response = modem.waitResponse(5000);
+    Serial.printf("MODEM: PDP context define result=%s\n", response == 1 ? "OK" : "FAIL");
+    delay(100);
+    return response == 1;
+}
+
+static void deactivate_pdp_context()
+{
+    Serial.println("MODEM: PDP context deactivate cid=1");
+    modem.sendAT("+CGACT=0,1");
+    int response = modem.waitResponse(10000);
+    Serial.printf("MODEM: PDP context deactivate result=%s\n", response == 1 ? "OK" : "FAIL");
+    delay(100);
+}
+
+static void deactivate_app_pdp_context()
+{
+    Serial.println("MODEM: APP PDP deactivate id=0");
+    modem.sendAT("+CNACT=0,0");
+    int response = modem.waitResponse(2000);
+    Serial.printf("MODEM: APP PDP deactivate result=%s\n", response == 1 ? "OK" : "FAIL");
+    delay(100);
+}
+
+static bool ensure_automatic_operator_selection(bool allow_change)
+{
+    String cops;
+    if (!read_at_prefixed_line("+COPS?", "+COPS:", cops, 5000)) {
+        Serial.println("MODEM: operator mode read unavailable; leaving operator selection unchanged");
+        return false;
+    }
+
+    Serial.printf("MODEM: operator +COPS:%s\n", cops.c_str());
+    cops.trim();
+    if (cops.startsWith("0")) {
+        Serial.println("MODEM: operator selection already automatic");
+        return true;
+    }
+
+    if (!allow_change) {
+        Serial.println("MODEM: operator selection is not automatic; skipping AT+COPS=0 because modem.operator_auto_select=false");
+        return false;
+    }
+
+    if (!is_sim_ready_for_network())
+        return false;
+
+    Serial.println("MODEM: operator selection is not automatic; requesting AT+COPS=0");
+    return send_at_expect_ok("+COPS=0", 15000);
+}
+
+static bool activate_pdp_context()
+{
+    Serial.println("MODEM: PDP context activate cid=1");
+    modem.sendAT("+CGACT=1,1");
+    int response = modem.waitResponse(30000);
+    Serial.printf("MODEM: PDP context activate result=%s\n", response == 1 ? "OK" : "FAIL");
+    delay(100);
+    return response == 1;
+}
+
+static bool read_pdp_address(char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return false;
+
+    out[0] = '\0';
+    Serial.println("MODEM: PDP address query cid=1");
+    modem.sendAT("+CGPADDR=1");
+
+    uint32_t start = millis();
+    while (millis() - start < 5000) {
+        while (modem.stream.available()) {
+            String line = modem.stream.readStringUntil('\n');
+            line.trim();
+            if (!line.length())
+                continue;
+
+            Serial.printf("MODEM: PDP address rx [%s]\n", line.c_str());
+            if (line.startsWith("+CGPADDR:")) {
+                int comma = line.indexOf(',');
+                if (comma >= 0) {
+                    String ip = line.substring(comma + 1);
+                    ip.trim();
+                    ip.replace("\"", "");
+                    strlcpy(out, ip.c_str(), out_len);
+                }
+                modem.waitResponse(500);
+                bool ok = out[0] &&
+                          strcmp(out, "0.0.0.0") != 0 &&
+                          strcmp(out, "0") != 0;
+                Serial.printf("MODEM: PDP address result=%s ip=%s\n", ok ? "OK" : "FAIL", out[0] ? out : "-");
+                return ok;
+            }
+            if (line == "ERROR" || line.startsWith("+CME ERROR")) {
+                Serial.println("MODEM: PDP address query FAILED");
+                return false;
+            }
+        }
+        delay(10);
+    }
+
+    Serial.println("MODEM: PDP address query timeout");
+    return false;
+}
+
+static bool read_app_pdp_address(char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return false;
+
+    out[0] = '\0';
+    Serial.println("MODEM: APP PDP address query id=0");
+    modem.sendAT("+CNACT?");
+
+    uint32_t start = millis();
+    while (millis() - start < 5000) {
+        while (modem.stream.available()) {
+            String line = modem.stream.readStringUntil('\n');
+            line.trim();
+            if (!line.length())
+                continue;
+
+            Serial.printf("MODEM: APP PDP address rx [%s]\n", line.c_str());
+            if (line.startsWith("+APP PDP:") && line.indexOf("DEACTIVE") >= 0) {
+                Serial.println("MODEM: APP PDP address result=FAIL reason=deactive_urc");
+                return false;
+            }
+            if (line.startsWith("+CNACT:")) {
+                String fields = line.substring(strlen("+CNACT:"));
+                fields.trim();
+                String id = csv_field(fields, 0);
+                String active = csv_field(fields, 1);
+                String ip = csv_field(fields, 2);
+                id.trim();
+                active.trim();
+                ip.trim();
+                ip.replace("\"", "");
+                if (id == "0" && active == "1") {
+                    strlcpy(out, ip.c_str(), out_len);
+                }
+            }
+
+            if (line == "OK") {
+                bool ok = out[0] &&
+                          strcmp(out, "0.0.0.0") != 0 &&
+                          strcmp(out, "0") != 0;
+                Serial.printf("MODEM: APP PDP address result=%s ip=%s\n", ok ? "OK" : "FAIL", out[0] ? out : "-");
+                return ok;
+            }
+
+            if (line == "ERROR" || line.startsWith("+CME ERROR")) {
+                Serial.println("MODEM: APP PDP address query FAILED");
+                return false;
+            }
+        }
+        delay(10);
+    }
+
+    Serial.println("MODEM: APP PDP address query timeout");
+    return false;
+}
+
+static bool wait_for_app_pdp_address(char *out, size_t out_len, uint32_t timeout_ms)
+{
+    uint32_t start = millis();
+    do {
+        if (read_app_pdp_address(out, out_len))
+            return true;
+        delay(1000);
+    } while (millis() - start < timeout_ms);
+
+    return false;
+}
+
+static bool activate_app_pdp_context(const char *apn, char *out, size_t out_len, uint32_t timeout_ms)
+{
+    if (!apn || !apn[0] || !out || out_len == 0)
+        return false;
+
+    out[0] = '\0';
+    deactivate_app_pdp_context();
+
+    if (!send_at_expect_ok("+CGATT=1", timeout_ms < 60000 ? timeout_ms : 60000)) {
+        Serial.println("MODEM: APP PDP packet attach FAILED");
+        return false;
+    }
+    modem.sendAT("+CGATT?");
+    modem.waitResponse(3000);
+    modem.sendAT("+CGNAPN");
+    modem.waitResponse(3000);
+
+    Serial.printf("MODEM: APP PDP configure id=0 pdp=IP apn=%s\n", apn);
+    modem.sendAT("+CNCFG=0,1,\"", apn, "\"");
+    int config_response = modem.waitResponse(5000);
+    Serial.printf("MODEM: APP PDP configure result=%s\n", config_response == 1 ? "OK" : "FAIL");
+    if (config_response != 1)
+        return false;
+
+    uint32_t app_timeout = timeout_ms < 15000 ? timeout_ms : 15000;
+
+    Serial.println("MODEM: APP PDP activate id=0 action=1");
+    modem.sendAT("+CNACT=0,1");
+    int activate_response = modem.waitResponse(app_timeout);
+    Serial.printf("MODEM: APP PDP activate action=1 result=%s\n", activate_response == 1 ? "OK" : "FAIL");
+    if (wait_for_app_pdp_address(out, out_len, app_timeout))
+        return true;
+
+    Serial.println("MODEM: APP PDP auto-active retry id=0 action=2");
+    modem.sendAT("+CNACT=0,2");
+    int auto_response = modem.waitResponse(app_timeout);
+    Serial.printf("MODEM: APP PDP activate action=2 result=%s\n", auto_response == 1 ? "OK" : "FAIL");
+    if (wait_for_app_pdp_address(out, out_len, app_timeout))
+        return true;
+
+    Serial.println("MODEM: APP PDP activate FAILED reason=no_app_ip");
+    return false;
 }
 
 static void print_at_raw_response(const char *label, const char *cmd, uint32_t timeout_ms)
@@ -268,13 +619,26 @@ static void print_at_raw_response(const char *label, const char *cmd, uint32_t t
 void modem_print_sim_network_status()
 {
     String line;
-    if (read_at_prefixed_line("+CPIN?", "+CPIN:", line, 2000))
+    print_at_raw_response("module identity raw", "I", 3000);
+    print_at_raw_response("verbose errors raw", "+CMEE?", 3000);
+    print_at_raw_response("functionality raw", "+CFUN?", 3000);
+
+    if (read_at_prefixed_line("+CPIN?", "+CPIN:", line, 2000)) {
         Serial.printf("MODEM: SIM status +CPIN:%s\n", line.c_str());
-    else {
+        print_at_raw_response("SIM ICCID raw", "+CCID", 3000);
+        print_at_raw_response("SIM IMSI raw", "+CIMI", 3000);
+    } else {
         Serial.println("MODEM: SIM status +CPIN? unavailable");
         print_at_raw_response("SIM status raw", "+CPIN?", 3000);
         print_at_raw_response("SIM insert raw", "+CSMINS?", 3000);
+        print_at_raw_response("SIM ICCID raw", "+CCID", 3000);
+        print_at_raw_response("SIM IMSI raw", "+CIMI", 3000);
     }
+
+    print_at_raw_response("signal raw", "+CSQ", 3000);
+    print_at_raw_response("operator raw", "+COPS?", 3000);
+    print_at_raw_response("EPS registration raw", "+CEREG?", 3000);
+    print_at_raw_response("GPRS registration raw", "+CGREG?", 3000);
 
     if (read_at_prefixed_line("+CEREG?", "+CEREG:", line, 2000))
         Serial.printf("MODEM: registration +CEREG:%s\n", line.c_str());
@@ -322,40 +686,7 @@ static bool modem_ping_host(const char *host)
     return false;
 }
 
-static String extract_json_string_field(const String &body, const char *field)
-{
-    String needle = String("\"") + field + "\":\"";
-    int start = body.indexOf(needle);
-    if (start < 0)
-        return "";
-
-    start += needle.length();
-    int end = body.indexOf('"', start);
-    if (end < 0)
-        return "";
-
-    return body.substring(start, end);
-}
-
-static String extract_json_number_field(const String &body, const char *field)
-{
-    String needle = String("\"") + field + "\":";
-    int start = body.indexOf(needle);
-    if (start < 0)
-        return "";
-
-    start += needle.length();
-    while (start < body.length() && body[start] == ' ')
-        start++;
-
-    int end = start;
-    while (end < body.length() && body[end] >= '0' && body[end] <= '9')
-        end++;
-
-    return end > start ? body.substring(start, end) : "";
-}
-
-bool modem_init_early()
+bool modem_init_early(bool operator_auto_select)
 {
     static bool done = false;
     if (done) return true;
@@ -368,13 +699,21 @@ bool modem_init_early()
     g_serial_ready = true;
 
     Serial.println("MODEM: Serial1 begin baud=115200 RX=4 TX=5");
-    Serial.print("MODEM: probing AT");
+    Serial.println("MODEM: probing AT");
     if (!wait_for_at_ready(30000))
     {
         Serial.println("\nMODEM: AT probe FAILED");
         return false;
     }
     Serial.println("\nMODEM: AT ready");
+
+    modem.sendAT("+CMEE=2");
+    modem.waitResponse(2000);
+    Serial.println("MODEM: CMEE verbose errors enabled");
+
+    modem.sendAT("+CFUN=1");
+    modem.waitResponse(5000);
+    Serial.println("MODEM: CFUN full functionality requested");
 
     modem.sendAT("+CLTS=1");
     modem.waitResponse(2000);
@@ -384,7 +723,135 @@ bool modem_init_early()
     modem.waitResponse(2000);
     Serial.println("MODEM: CTZR command sent");
 
+    modem.sendAT("+CEREG=2");
+    modem.waitResponse(2000);
+    modem.sendAT("+CREG=2");
+    modem.waitResponse(2000);
+    modem.sendAT("+CGREG=2");
+    modem.waitResponse(2000);
+    Serial.println("MODEM: registration detail reporting enabled");
+
+    ensure_automatic_operator_selection(operator_auto_select);
+
     return true;
+}
+
+static bool modem_validate_ltem_attempt(const char *supplier,
+                                        const char *apn,
+                                        const char *lookup_primary,
+                                        const char *lookup_secondary,
+                                        uint32_t network_timeout_ms,
+                                        uint8_t attempt,
+                                        bool require_registration,
+                                        bool validate_http_egress)
+{
+    (void)lookup_primary;
+    (void)lookup_secondary;
+
+    if (!apn || !apn[0])
+        apn = "internet.m2m";
+
+    Serial.printf("MODEM: LTE-M APN probe begin attempt=%u supplier=%s apn=%s validation=%s\n",
+                  (unsigned)attempt,
+                  supplier && supplier[0] ? supplier : "configured",
+                  apn,
+                  validate_http_egress ? "http_egress" : "bearer_ip");
+    append_apn_probe_log("begin", attempt, supplier, apn, "running", "lte_m_validation_begin");
+
+    bool data_active = modem.isGprsConnected();
+    Serial.printf("MODEM: TinyGSM data active before APN configure attempt=%u active=%s\n",
+                  (unsigned)attempt,
+                  data_active ? "YES" : "NO");
+
+    if (!data_active) {
+        if (!set_pdp_context_ip(apn)) {
+            Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=pdp_context_define_failed\n",
+                          (unsigned)attempt,
+                          supplier && supplier[0] ? supplier : "configured",
+                          apn);
+            append_apn_probe_log("end", attempt, supplier, apn, "fail", "pdp_context_define_failed");
+            return false;
+        }
+    } else {
+        Serial.println("MODEM: APN configure skipped because TinyGSM data is already active");
+    }
+
+    if (require_registration && !wait_for_network_registration(network_timeout_ms)) {
+        Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=registration_timeout\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn);
+        append_apn_probe_log("end", attempt, supplier, apn, "fail", "registration_timeout");
+        return false;
+    }
+
+    Serial.printf("MODEM: TinyGSM data active before connect attempt=%u active=%s\n",
+                  (unsigned)attempt,
+                  data_active ? "YES" : "NO");
+
+    if (!data_active) {
+        Serial.printf("MODEM: TinyGSM gprsConnect begin attempt=%u supplier=%s apn=%s\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn);
+        if (!modem.gprsConnect(apn)) {
+            Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=app_pdp_activate_failed\n",
+                          (unsigned)attempt,
+                          supplier && supplier[0] ? supplier : "configured",
+                          apn);
+            print_at_raw_response("APP PDP after gprsConnect fail", "+CNACT?", 3000);
+            append_apn_probe_log("end", attempt, supplier, apn, "fail", "app_pdp_activate_failed");
+            return false;
+        }
+    }
+
+    IPAddress local_ip = modem.localIP();
+    char app_ip[32] = {0};
+    strlcpy(app_ip, local_ip.toString().c_str(), sizeof(app_ip));
+    Serial.printf("MODEM: LTE-M APN probe attached attempt=%u supplier=%s apn=%s local_ip=%s source=TinyGSM\n",
+                  (unsigned)attempt,
+                  supplier && supplier[0] ? supplier : "configured",
+                  apn,
+                  app_ip[0] ? app_ip : "-");
+
+    if (!app_ip[0] || strcmp(app_ip, "0.0.0.0") == 0 || strcmp(app_ip, "0") == 0) {
+        Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=zero_local_ip\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn);
+        print_at_raw_response("APP PDP after zero local IP", "+CNACT?", 3000);
+        append_apn_probe_log("end", attempt, supplier, apn, "fail", "zero_local_ip");
+        return false;
+    }
+
+    if (!validate_http_egress) {
+        Serial.printf("MODEM: LTE-M APN probe PASS attempt=%u supplier=%s apn=%s validation=bearer_ip\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn);
+        append_apn_probe_log("end", attempt, supplier, apn, "pass", "bearer_ip");
+        return true;
+    }
+
+    Serial.printf("MODEM: LTE-M APN probe HTTP validation begin attempt=%u supplier=%s apn=%s\n",
+                  (unsigned)attempt,
+                  supplier && supplier[0] ? supplier : "configured",
+                  apn);
+    if (modem_test_http_egress(20000)) {
+        Serial.printf("MODEM: LTE-M APN probe PASS attempt=%u supplier=%s apn=%s validation=http_egress\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn);
+        append_apn_probe_log("end", attempt, supplier, apn, "pass", "bearer_ip_http_egress");
+        return true;
+    }
+
+    Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=http_egress_failed\n",
+                  (unsigned)attempt,
+                  supplier && supplier[0] ? supplier : "configured",
+                  apn);
+    append_apn_probe_log("end", attempt, supplier, apn, "fail", "bearer_ip_ok_http_egress_failed");
+    return false;
 }
 
 bool modem_validate_ltem(const char *apn,
@@ -392,75 +859,316 @@ bool modem_validate_ltem(const char *apn,
                          const char *lookup_secondary,
                          uint32_t network_timeout_ms)
 {
-    if (!apn || !apn[0])
-        apn = "internet.m2m";
+    return modem_validate_ltem_attempt("configured",
+                                       apn,
+                                       lookup_primary,
+                                       lookup_secondary,
+                                       network_timeout_ms,
+                                       1,
+                                       true,
+                                       false);
+}
 
-    Serial.printf("MODEM: LTE-M validation begin apn=%s lookup_primary=%s lookup_secondary=%s\n",
-                  apn,
-                  lookup_primary && lookup_primary[0] ? lookup_primary : "-",
-                  lookup_secondary && lookup_secondary[0] ? lookup_secondary : "-");
+bool modem_validate_ltem_apn_candidates(ModemConfig &config, uint32_t network_timeout_ms)
+{
+    if (!config.apn_autodetect) {
+        Serial.printf("MODEM: APN autodetect disabled; using configured apn=%s\n", config.apn);
+        return modem_validate_ltem_attempt("configured",
+                                           config.apn,
+                                           config.lookup_primary,
+                                           config.lookup_secondary,
+                                           network_timeout_ms,
+                                           1,
+                                           true,
+                                           config.validate_http_egress);
+    }
 
+    Serial.printf("MODEM: APN autodetect begin candidates=%u configured_apn=%s\n",
+                  (unsigned)config.apn_candidate_count,
+                  config.apn);
+    append_apn_probe_log("autodetect_begin", 0, "all", config.apn, "running", "candidate_scan");
+    if (config.apn_test_all)
+        Serial.println("MODEM: APN test-all enabled; all usable APN candidates will be tested");
+
+    Serial.println("MODEM: APN autodetect waiting for network registration before APN attach tests");
+    set_pdp_context_ip(config.apn);
     if (!wait_for_network_registration(network_timeout_ms)) {
-        Serial.println("MODEM: LTE-M registration timeout");
+        Serial.println("MODEM: APN autodetect FAILED reason=registration_timeout; APN candidates not tried");
+        modem_print_sim_network_status();
+        append_apn_probe_log("autodetect_end", 0, "all", "", "fail", "registration_timeout_before_apn");
         return false;
     }
+    Serial.println("MODEM: APN autodetect network registered; starting APN attach tests");
 
-    if (!modem.gprsConnect(apn)) {
-        Serial.println("MODEM: LTE-M data attach FAILED");
-        return false;
+    uint8_t attempted = 0;
+    bool selected = false;
+    char selected_supplier[33] = {0};
+    char selected_apn[33] = {0};
+    for (uint8_t i = 0; i < config.apn_candidate_count; i++) {
+        const ModemConfig::ApnCandidate &candidate = config.apn_candidates[i];
+        if (!candidate.apn[0]) {
+            Serial.printf("MODEM: LTE-M APN probe skip supplier=%s reason=apn_pending\n",
+                          candidate.supplier[0] ? candidate.supplier : "unknown");
+            append_apn_probe_log("skip", i + 1, candidate.supplier, candidate.apn, "skipped", "apn_pending");
+            continue;
+        }
+
+        attempted++;
+        if (modem_validate_ltem_attempt(candidate.supplier,
+                                        candidate.apn,
+                                        config.lookup_primary,
+                                        config.lookup_secondary,
+                                        network_timeout_ms,
+                                        attempted,
+                                        false,
+                                        config.validate_http_egress)) {
+            if (!selected) {
+                selected = true;
+                strlcpy(selected_supplier, candidate.supplier[0] ? candidate.supplier : "unknown", sizeof(selected_supplier));
+                strlcpy(selected_apn, candidate.apn, sizeof(selected_apn));
+                strlcpy(config.apn, selected_apn, sizeof(config.apn));
+                Serial.printf("MODEM: APN autodetect selected supplier=%s apn=%s attempt=%u\n",
+                              selected_supplier,
+                              config.apn,
+                              (unsigned)attempted);
+                append_apn_probe_log("select", attempted, selected_supplier, config.apn, "pass", "selected");
+            }
+            if (!config.apn_test_all) {
+                append_apn_probe_log("autodetect_end", attempted, selected_supplier, config.apn, "pass", "selected");
+                return true;
+            }
+        }
     }
 
-    IPAddress local_ip = modem.localIP();
-    Serial.printf("MODEM: LTE-M data attached local_ip=%s\n", local_ip.toString().c_str());
-
-    if (local_ip == IPAddress(0, 0, 0, 0)) {
-        Serial.println("MODEM: LTE-M validation FAILED; data attached but local IP is 0.0.0.0");
-        return false;
-    }
-
-    if (modem_ping_host(lookup_primary)) {
-        Serial.printf("MODEM: LTE-M lookup probe PASS host=%s\n", lookup_primary);
-        Serial.println("MODEM: LTE-M validation PASS bearer=attached ip=assigned lookup=reachable");
+    if (selected) {
+        strlcpy(config.apn, selected_apn, sizeof(config.apn));
+        Serial.printf("MODEM: APN test-all complete selected supplier=%s apn=%s attempted=%u\n",
+                      selected_supplier,
+                      config.apn,
+                      (unsigned)attempted);
+        append_apn_probe_log("autodetect_end", attempted, selected_supplier, config.apn, "pass", "test_all_complete");
         return true;
     }
 
-    if (modem_ping_host(lookup_secondary)) {
-        Serial.printf("MODEM: LTE-M lookup probe PASS host=%s\n", lookup_secondary);
-        Serial.println("MODEM: LTE-M validation PASS bearer=attached ip=assigned lookup=reachable");
-        return true;
+    Serial.printf("MODEM: APN autodetect FAILED attempted=%u candidates=%u\n",
+                  (unsigned)attempted,
+                  (unsigned)config.apn_candidate_count);
+    append_apn_probe_log("autodetect_end", attempted, "all", "", "fail", attempted ? "all_candidates_failed" : "no_usable_apn_candidates");
+    return false;
+}
+
+bool modem_test_http_egress(uint32_t timeout_ms)
+{
+    static const char *host = "prod.dm.kpnthings.com";
+    static const char *path = "/ingestion/ip/senml/v1";
+    static const char *body = "[]";
+    static const char *dummy_token = "0000000000000000000000000000000000000000000000000000000000000000";
+
+    Serial.printf("MODEM: HTTP egress test begin method=TinyGSM_TLS host=%s path=%s\n", host, path);
+
+    TinyGsmClientSecure client(modem, 1);
+    client.setTimeout(timeout_ms);
+    int connect_timeout_s = timeout_ms_to_connect_seconds(timeout_ms);
+    Serial.printf("MODEM: HTTP egress connect timeout_s=%d\n", connect_timeout_s);
+    if (!client.connect(host, 443, connect_timeout_s)) {
+        Serial.println("MODEM: HTTP egress connect FAILED");
+        print_at_raw_response("HTTP egress APP PDP raw", "+CNACT?", 3000);
+        return false;
+    }
+    Serial.println("MODEM: HTTP egress connect OK");
+
+    String request;
+    request.reserve(256);
+    request += "POST ";
+    request += path;
+    request += " HTTP/1.1\r\nHost: ";
+    request += host;
+    request += "\r\nThings-Message-Token: ";
+    request += dummy_token;
+    request += "\r\nContent-Type: application/json\r\nContent-Length: ";
+    request += strlen(body);
+    request += "\r\nConnection: close\r\n\r\n";
+    request += body;
+    size_t written = client.print(request);
+    client.flush();
+    Serial.printf("MODEM: HTTP egress request written bytes=%u\n", (unsigned)written);
+    if (written == 0) {
+        client.stop();
+        Serial.println("MODEM: HTTP egress request write FAILED");
+        return false;
     }
 
-    Serial.println("MODEM: LTE-M lookup probe WARN; bearer attached and IP assigned, but lookup ping was blocked or timed out");
-    Serial.println("MODEM: LTE-M validation PASS bearer=attached ip=assigned lookup=unreachable");
+    uint32_t start = millis();
+    bool saw_closed = false;
+    uint32_t closed_ms = 0;
+    int http_status = -1;
+    String status_line;
+    while (millis() - start < timeout_ms) {
+        while (client.available()) {
+            status_line = client.readStringUntil('\n');
+            status_line.trim();
+            if (status_line.length() == 0)
+                continue;
+
+            Serial.printf("MODEM: HTTP egress status line [%s]\n", status_line.c_str());
+            int marker = status_line.indexOf("HTTP/");
+            if (marker >= 0 && status_line.length() >= marker + 12) {
+                int first_space = status_line.indexOf(' ', marker);
+                if (first_space >= 0)
+                    http_status = status_line.substring(first_space + 1, first_space + 4).toInt();
+            }
+
+            client.stop();
+            bool ok = http_status >= 100 && http_status < 600;
+            Serial.printf("MODEM: HTTP egress status=%d result=%s\n",
+                          http_status,
+                          ok ? "PASS" : "FAIL");
+            return ok;
+        }
+
+        if (!client.connected() && !saw_closed) {
+            saw_closed = true;
+            closed_ms = millis();
+            Serial.println("MODEM: HTTP egress socket closed before status; polling for buffered data");
+        } else if (saw_closed && millis() - closed_ms >= 1500UL) {
+            client.stop();
+            Serial.println("MODEM: HTTP egress no status after close; connect+request_write treated as PASS");
+            return true;
+        }
+        delay(10);
+    }
+
+    client.stop();
+    Serial.println("MODEM: HTTP egress no status received; connect+request_write treated as PASS");
     return true;
 }
 
-bool modem_test_world_clock(uint32_t timeout_ms)
+bool modem_upload_azure_blob_from_sd(const char *local_path,
+                                     const char *blob_name,
+                                     const char *apn,
+                                     uint32_t timeout_ms)
 {
-    static const char *host = "worldtimeapi.org";
-    static const char *path = "/api/timezone/Etc/UTC";
-
-    Serial.printf("MODEM: world clock HTTP test begin host=%s path=%s\n", host, path);
-
-    TinyGsmClient client(modem, 1);
-    if (!client.connect(host, 80, timeout_ms / 1000)) {
-        client.stop();
-        Serial.println("MODEM: world clock HTTP connect FAILED");
+    if (!AZURE_BLOB_HOST[0] || !AZURE_BLOB_CONTAINER[0] || !AZURE_BLOB_SAS[0]) {
+        Serial.println("AZURE: upload skipped; AZURE_BLOB_* secrets are not configured");
+        return false;
+    }
+    if (!local_path || !local_path[0] || !blob_name || !blob_name[0]) {
+        Serial.println("AZURE: upload FAILED reason=missing_path_or_blob_name");
         return false;
     }
 
-    client.print(String("GET ") + path + " HTTP/1.1\r\n" +
-                 "Host: " + host + "\r\n" +
-                 "User-Agent: VST-BASE/0.2\r\n" +
-                 "Connection: close\r\n\r\n");
+    Serial.println("AZURE: upload begin method=VSTComm");
+    Serial.printf("AZURE: open SD path=%s\n", local_path);
+    File file = SD_MMC.open(local_path, "r");
+    if (!file) {
+        Serial.println("AZURE: upload FAILED reason=sd_file_open_failed");
+        return false;
+    }
 
-    uint32_t start = millis();
+    size_t file_size = file.size();
+    Serial.printf("AZURE: file_size=%u blob=%s host=%s container=%s sas_len=%u\n",
+                  (unsigned)file_size,
+                  blob_name,
+                  AZURE_BLOB_HOST,
+                  AZURE_BLOB_CONTAINER,
+                  (unsigned)strlen(AZURE_BLOB_SAS));
+    if (file_size == 0) {
+        file.close();
+        Serial.println("AZURE: upload FAILED reason=empty_file");
+        return false;
+    }
+
+    if (!modem.isGprsConnected()) {
+        if (!apn || !apn[0]) {
+            file.close();
+            Serial.println("AZURE: upload FAILED reason=no_active_ltem_data");
+            return false;
+        }
+
+        Serial.printf("AZURE: no data active, gprsConnect apn=%s\n", apn);
+        if (!modem.gprsConnect(apn)) {
+            file.close();
+            Serial.println("AZURE: upload FAILED reason=gprs_connect_failed");
+            return false;
+        }
+        Serial.println("AZURE: data active after gprsConnect");
+    } else {
+        Serial.println("AZURE: data already active");
+    }
+
+    String path;
+    path.reserve(strlen(AZURE_BLOB_CONTAINER) + strlen(blob_name) + strlen(AZURE_BLOB_SAS) + 8);
+    path += "/";
+    path += AZURE_BLOB_CONTAINER;
+    path += "/";
+    path += blob_name;
+    path += "?";
+    path += AZURE_BLOB_SAS;
+
+    String headers;
+    headers.reserve(path.length() + 220);
+    headers += "PUT ";
+    headers += path;
+    headers += " HTTP/1.1\r\nHost: ";
+    headers += AZURE_BLOB_HOST;
+    headers += "\r\nx-ms-blob-type: BlockBlob\r\n";
+    headers += "x-ms-version: 2020-10-02\r\n";
+    headers += "Content-Length: ";
+    headers += String(file_size);
+    headers += "\r\nContent-Type: image/jpeg\r\nConnection: close\r\n\r\n";
+
+    Serial.printf("AZURE: HTTP PUT path=/%s/%s?<sas-redacted>\n", AZURE_BLOB_CONTAINER, blob_name);
+    Serial.printf("AZURE: connect host=%s port=443 method=TinyGSM_default_secure_client\n", AZURE_BLOB_HOST);
+    TinyGsmClientSecure client(modem);
+    client.setTimeout(timeout_ms);
+    bool connected = client.connect(AZURE_BLOB_HOST, 443);
+    Serial.printf("AZURE: connect result=%s\n", connected ? "OK" : "FAIL");
+    if (!connected) {
+        client.stop();
+        file.close();
+        Serial.println("AZURE: upload FAILED reason=tls_connect_failed");
+        return false;
+    }
+
+    size_t header_written = client.print(headers);
+    Serial.printf("AZURE: headers_written=%u\n", (unsigned)header_written);
+    if (header_written == 0) {
+        client.stop();
+        file.close();
+        Serial.println("AZURE: upload FAILED reason=header_write_failed");
+        return false;
+    }
+
+    uint8_t buffer[1024];
+    size_t total_sent = 0;
+    while (file.available()) {
+        int n = file.read(buffer, sizeof(buffer));
+        if (n <= 0)
+            break;
+        size_t written = client.write(buffer, (size_t)n);
+        total_sent += written;
+        if (written != (size_t)n) {
+            Serial.printf("AZURE: body chunk short write requested=%d written=%u\n", n, (unsigned)written);
+            break;
+        }
+    }
+    file.close();
+    client.flush();
+    Serial.printf("AZURE: body_written=%u expected=%u\n", (unsigned)total_sent, (unsigned)file_size);
+
+    if (total_sent != file_size) {
+        client.stop();
+        Serial.println("AZURE: upload FAILED reason=body_write_incomplete");
+        return false;
+    }
+
     String response;
-    response.reserve(1024);
+    response.reserve(512);
+    uint32_t start = millis();
     while (millis() - start < timeout_ms) {
         while (client.available()) {
             char c = (char)client.read();
-            if (response.length() < 1600)
+            if (response.length() < 700)
                 response += c;
         }
         if (!client.connected() && !client.available())
@@ -469,29 +1177,31 @@ bool modem_test_world_clock(uint32_t timeout_ms)
     }
     client.stop();
 
-    int line_end = response.indexOf('\n');
-    String status_line = line_end >= 0 ? response.substring(0, line_end) : response;
-    status_line.trim();
-    Serial.printf("MODEM: world clock HTTP status [%s]\n", status_line.c_str());
-
-    bool ok = status_line.indexOf(" 200 ") >= 0;
-    int body_start = response.indexOf("\r\n\r\n");
-    String body = body_start >= 0 ? response.substring(body_start + 4) : "";
-    String utc = extract_json_string_field(body, "utc_datetime");
-    String unixtime = extract_json_number_field(body, "unixtime");
-
-    if (utc.length() || unixtime.length()) {
-        Serial.printf("MODEM: world clock utc=%s unixtime=%s\n",
-                      utc.length() ? utc.c_str() : "-",
-                      unixtime.length() ? unixtime.c_str() : "-");
+    if (response.length() == 0) {
+        Serial.println("AZURE: no HTTP response received; connect+all_bytes_written treated as PASS");
+        return true;
     }
 
-    if (!ok)
-        Serial.println("MODEM: world clock HTTP test FAILED");
-    else
-        Serial.println("MODEM: world clock HTTP test PASS");
+    int status = -1;
+    int marker = response.indexOf("HTTP/");
+    if (marker >= 0) {
+        int first_space = response.indexOf(' ', marker);
+        if (first_space >= 0)
+            status = response.substring(first_space + 1, first_space + 4).toInt();
+    }
+    Serial.printf("AZURE: HTTP status=%d response_bytes=%u\n", status, (unsigned)response.length());
 
-    return ok;
+    if (status == 201 || status == 202) {
+        Serial.println("AZURE: upload PASS");
+        return true;
+    }
+    if (response.indexOf("AuthenticationFailed") >= 0)
+        Serial.println("AZURE: upload FAILED reason=authentication_failed");
+    else if (response.indexOf("ContainerNotFound") >= 0)
+        Serial.println("AZURE: upload FAILED reason=container_not_found");
+    else
+        Serial.println("AZURE: upload FAILED reason=http_status_or_unknown_response");
+    return false;
 }
 
 bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms)

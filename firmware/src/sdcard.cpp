@@ -262,6 +262,63 @@ static bool is_clockwise_direction(const char *direction)
            strcasecmp(direction, "cw") == 0;
 }
 
+static bool modem_candidate_exists(const ModemConfig &modem, const char *apn)
+{
+    if (!apn || !apn[0])
+        return false;
+
+    for (uint8_t i = 0; i < modem.apn_candidate_count; i++) {
+        if (strcasecmp(modem.apn_candidates[i].apn, apn) == 0)
+            return true;
+    }
+
+    return false;
+}
+
+static void modem_add_apn_candidate(ModemConfig &modem, const char *supplier, const char *apn)
+{
+    if (modem.apn_candidate_count >= ModemConfig::MAX_APN_CANDIDATES)
+        return;
+
+    ModemConfig::ApnCandidate &candidate = modem.apn_candidates[modem.apn_candidate_count++];
+    String supplier_text = supplier && supplier[0] ? supplier : "unknown";
+    String apn_text = apn ? apn : "";
+    supplier_text.trim();
+    apn_text.trim();
+    strlcpy(candidate.supplier, supplier_text.length() ? supplier_text.c_str() : "unknown", sizeof(candidate.supplier));
+    strlcpy(candidate.apn, apn_text.c_str(), sizeof(candidate.apn));
+}
+
+static void modem_load_default_apn_candidates(ModemConfig &modem)
+{
+    modem.apn_candidate_count = 0;
+    modem_add_apn_candidate(modem, "Onomondo", "onomondo");
+    modem_add_apn_candidate(modem, "KPNThings", "internet.m2m");
+    modem_add_apn_candidate(modem, "Wireless Logic Benelux", "");
+    modem_add_apn_candidate(modem, "ThingsData/Tele2 2G-4G", "m2m.tele2.com");
+    modem_add_apn_candidate(modem, "ThingsData/Tele2 5G", "iot.tele2.com");
+}
+
+static void modem_prefer_configured_apn(ModemConfig &modem)
+{
+    if (!modem.apn[0])
+        return;
+
+    for (uint8_t i = 0; i < modem.apn_candidate_count; i++) {
+        if (strcasecmp(modem.apn_candidates[i].apn, modem.apn) != 0)
+            continue;
+
+        if (i == 0)
+            return;
+
+        ModemConfig::ApnCandidate preferred = modem.apn_candidates[i];
+        for (uint8_t j = i; j > 0; j--)
+            modem.apn_candidates[j] = modem.apn_candidates[j - 1];
+        modem.apn_candidates[0] = preferred;
+        return;
+    }
+}
+
 /* =============================
    INIT
    ============================= */
@@ -494,9 +551,15 @@ bool sdcard_load_config(BaseConfig &config)
     JsonObject modem = doc["modem"];
     config.modem.mode = modem["mode"] | config.modem.mode;
     const char *apn = modem["apn"] | config.modem.apn;
+    config.modem.apn_autodetect = modem["apn_autodetect"] | config.modem.apn_autodetect;
+    config.modem.apn_test_all = modem["apn_test_all"] | config.modem.apn_test_all;
+    config.modem.validate_http_egress = modem["validate_http_egress"] | config.modem.validate_http_egress;
+    config.modem.operator_auto_select = modem["operator_auto_select"] | config.modem.operator_auto_select;
     const char *lookup_primary = modem["lookup_primary"] | config.modem.lookup_primary;
     const char *lookup_secondary = modem["lookup_secondary"] | config.modem.lookup_secondary;
-    strlcpy(config.modem.apn, apn, sizeof(config.modem.apn));
+    String modem_apn = apn;
+    modem_apn.trim();
+    strlcpy(config.modem.apn, modem_apn.c_str(), sizeof(config.modem.apn));
     strlcpy(config.modem.lookup_primary, lookup_primary, sizeof(config.modem.lookup_primary));
     strlcpy(config.modem.lookup_secondary, lookup_secondary, sizeof(config.modem.lookup_secondary));
     if (config.modem.mode > 2)
@@ -507,6 +570,34 @@ bool sdcard_load_config(BaseConfig &config)
         strlcpy(config.modem.lookup_primary, "1.1.1.1", sizeof(config.modem.lookup_primary));
     if (!config.modem.lookup_secondary[0])
         strlcpy(config.modem.lookup_secondary, "8.8.8.8", sizeof(config.modem.lookup_secondary));
+
+    JsonArray apn_candidates = modem["apn_candidates"];
+    config.modem.apn_candidate_count = 0;
+    if (!apn_candidates.isNull()) {
+        for (JsonVariant candidate_value : apn_candidates) {
+            if (config.modem.apn_candidate_count >= ModemConfig::MAX_APN_CANDIDATES)
+                break;
+
+            JsonObject candidate = candidate_value.as<JsonObject>();
+            if (candidate.isNull())
+                continue;
+
+            const char *supplier = candidate["supplier"] | "unknown";
+            const char *candidate_apn = candidate["apn"] | "";
+            modem_add_apn_candidate(config.modem, supplier, candidate_apn);
+        }
+    }
+    if (config.modem.apn_candidate_count == 0)
+        modem_load_default_apn_candidates(config.modem);
+    if (config.modem.apn[0] && !modem_candidate_exists(config.modem, config.modem.apn)) {
+        for (int i = (int)min<uint8_t>(config.modem.apn_candidate_count, ModemConfig::MAX_APN_CANDIDATES - 1); i > 0; i--)
+            config.modem.apn_candidates[i] = config.modem.apn_candidates[i - 1];
+        config.modem.apn_candidate_count = min<uint8_t>(config.modem.apn_candidate_count + 1, ModemConfig::MAX_APN_CANDIDATES);
+        strlcpy(config.modem.apn_candidates[0].supplier, "configured", sizeof(config.modem.apn_candidates[0].supplier));
+        strlcpy(config.modem.apn_candidates[0].apn, config.modem.apn, sizeof(config.modem.apn_candidates[0].apn));
+    } else if (config.modem.apn_autodetect) {
+        modem_prefer_configured_apn(config.modem);
+    }
 
     JsonObject web = doc["web"];
     config.web.mode = web["mode"] | config.web.mode;
@@ -529,6 +620,10 @@ bool sdcard_load_config(BaseConfig &config)
         power["deep_sleep_start_hour"] | config.power.deep_sleep_start_hour;
     config.power.deep_sleep_end_hour =
         power["deep_sleep_end_hour"] | config.power.deep_sleep_end_hour;
+    const char *reboot_cron = power["reboot_cron"] | config.power.reboot_cron;
+    strlcpy(config.power.reboot_cron, reboot_cron, sizeof(config.power.reboot_cron));
+    config.power.reboot_after_deep_sleep_wakeup =
+        power["reboot_after_deep_sleep_wakeup"] | config.power.reboot_after_deep_sleep_wakeup;
     if (config.power.log_interval_seconds == 0)
         config.power.log_interval_seconds = 900;
     if (config.power.log_interval_seconds > 86400)
@@ -546,7 +641,13 @@ bool sdcard_load_config(BaseConfig &config)
     config.health.led = health["led"] | config.health.led;
     config.health.led = config.health.led ? 1 : 0;
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 health_led=%u time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    JsonObject azure = doc["azure"];
+    config.azure.max_uploads_per_boot =
+        azure["max_uploads_per_boot"] | config.azure.max_uploads_per_boot;
+    if (config.azure.max_uploads_per_boot > 20)
+        config.azure.max_uploads_per_boot = 20;
+
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_max_uploads_per_boot=%u time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -569,13 +670,28 @@ bool sdcard_load_config(BaseConfig &config)
                   config.power.deep_sleep,
                   config.power.deep_sleep_start_hour,
                   config.power.deep_sleep_end_hour,
+                  config.power.reboot_cron,
+                  config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO",
                   config.health.led,
+                  config.azure.max_uploads_per_boot,
                   config.time.network_timeout_seconds,
                   config.time.allow_gnss_fallback ? "YES" : "NO",
                   config.modem.mode,
                   config.modem.apn,
+                  config.modem.apn_autodetect ? "YES" : "NO",
+                  config.modem.apn_test_all ? "YES" : "NO",
+                  config.modem.validate_http_egress ? "YES" : "NO",
+                  config.modem.operator_auto_select ? "YES" : "NO",
+                  config.modem.apn_candidate_count,
                   config.modem.lookup_primary,
                   config.modem.lookup_secondary);
+    for (uint8_t i = 0; i < config.modem.apn_candidate_count; i++) {
+        Serial.printf("SD: modem APN candidate #%u supplier=%s apn=%s%s\n",
+                      (unsigned)(i + 1),
+                      config.modem.apn_candidates[i].supplier,
+                      config.modem.apn_candidates[i].apn[0] ? config.modem.apn_candidates[i].apn : "-",
+                      config.modem.apn_candidates[i].apn[0] ? "" : " pending");
+    }
 
     return true;
 }

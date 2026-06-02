@@ -3,6 +3,9 @@
 #include <string.h>
 #include <time.h>
 
+#include <FS.h>
+#include <SD_MMC.h>
+
 #include "esp_heap_caps.h"
 #include "version.h"
 #include "sdcard.h"
@@ -30,6 +33,8 @@ static constexpr size_t GV2_UART_RX_BUFFER_SIZE = 32UL * 1024UL;
 static constexpr size_t GV2_UART_READ_CHUNK_SIZE = 2048;
 static constexpr const char *FRAME_LOG_PATH = "/frames.log";
 static constexpr const char *HEALTH_LOG_PATH = "/health.log";
+static constexpr const char *AZURE_QUEUE_PATH = "/azure_queue.log";
+static constexpr uint32_t AZURE_UPLOAD_FAILURE_COOLDOWN_MS = 120000UL;
 
 static const uint8_t JPEG_MAGIC[4] = {'V', 'S', 'T', 'J'};
 static const uint8_t STATE_MAGIC[4] = {'V', 'S', 'T', 'S'};
@@ -88,6 +93,7 @@ static HeartbeatRxState heartbeat_rx;
 static Gv2UartStats stats;
 static const BaseConfig *log_config = nullptr;
 static const ModemGnssInfo *log_gnss = nullptr;
+static uint32_t azure_upload_resume_ms = 0;
 
 static void shift_magic_window(uint8_t *window, uint8_t *filled, uint8_t value)
 {
@@ -344,7 +350,39 @@ void gv2_power_on()
     pinMode(GV2_POWER_GPIO_CFG, OUTPUT);
     digitalWrite(GV2_POWER_GPIO_CFG, HIGH);
     delay(100);
-    Serial.printf("GV2: power ON gpio=%d\n", GV2_POWER_GPIO_CFG);
+    Serial.printf("GV2: power-control signal ON gpio=%d\n", GV2_POWER_GPIO_CFG);
+}
+
+static void gv2_pause_for_modem_upload()
+{
+    abort_active_jpeg();
+    reset_uart_sync_windows();
+    uint32_t discarded = flush_gv2_uart_until_quiet(20, 150);
+    Gv2Serial.end();
+
+    pinMode(active_config.rx_gpio, INPUT);
+    pinMode(active_config.tx_gpio, INPUT);
+
+    Serial.printf("GV2: UART paused for modem upload discarded=%lu bytes rx=%u tx=%u\n",
+                  (unsigned long)discarded,
+                  (unsigned)active_config.rx_gpio,
+                  (unsigned)active_config.tx_gpio);
+}
+
+static void gv2_resume_after_modem_upload()
+{
+    size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
+    Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
+    Gv2Serial.setRxTimeout(1);
+    delay(50);
+    uint32_t discarded = flush_gv2_uart_until_quiet(20, 250);
+    reset_uart_sync_windows();
+    Serial.printf("GV2: UART resumed RX=%d TX=%d baud=%lu rx_buffer=%u discarded=%lu\n",
+                  active_config.rx_gpio,
+                  active_config.tx_gpio,
+                  (unsigned long)active_config.baud,
+                  (unsigned)rx_buffer,
+                  (unsigned long)discarded);
 }
 
 void gv2_prepare_for_sleep(const UartConfig &config)
@@ -360,7 +398,7 @@ void gv2_prepare_for_sleep(const UartConfig &config)
         digitalWrite(GV2_POWER_GPIO_CFG, LOW);
         pinMode(GV2_POWER_GPIO_CFG, OUTPUT);
         delay(20);
-        Serial.printf("GV2: power OFF gpio=%d rx=%u tx=%u\n",
+        Serial.printf("GV2: power-control signal OFF gpio=%d rx=%u tx=%u\n",
                       GV2_POWER_GPIO_CFG,
                       (unsigned)config.rx_gpio,
                       (unsigned)config.tx_gpio);
@@ -414,6 +452,61 @@ static uint16_t configured_occurrence()
     const BaseConfig *cfg = log_config;
     uint16_t occurrence = cfg ? cfg->inference.occurrence : InferenceConfig{}.occurrence;
     return occurrence == 0 ? 1 : occurrence;
+}
+
+static bool azure_saved_image_upload_enabled()
+{
+    const BaseConfig *cfg = log_config;
+    if (!cfg || cfg->azure.max_uploads_per_boot == 0 || cfg->modem.mode != 2)
+        return false;
+
+    uint32_t now = millis();
+    if (azure_upload_resume_ms != 0 && (int32_t)(now - azure_upload_resume_ms) < 0)
+        return false;
+
+    return true;
+}
+
+static void make_blob_name_from_saved_path(const char *path, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return;
+
+    const char *name = path && path[0] ? strrchr(path, '/') : nullptr;
+    name = name ? name + 1 : path;
+    if (!name || !name[0])
+        name = "frame.jpg";
+
+    snprintf(out, out_len, "saved_%s", name);
+}
+
+static bool queue_azure_saved_image_upload(const char *filename, const char *blob_name)
+{
+    if (!filename || !filename[0] || !blob_name || !blob_name[0])
+        return false;
+
+    File f = SD_MMC.open(AZURE_QUEUE_PATH, FILE_APPEND);
+    if (!f) {
+        Serial.printf("GV2: Azure upload queue open failed path=%s\n", AZURE_QUEUE_PATH);
+        return false;
+    }
+
+    String line;
+    line.reserve(strlen(filename) + strlen(blob_name) + 40);
+    line += current_timestamp();
+    line += ",";
+    line += filename;
+    line += ",";
+    line += blob_name;
+    line += "\n";
+
+    size_t written = f.print(line);
+    f.close();
+    Serial.printf("GV2: Azure saved-image upload queued file=%s blob=%s bytes=%u\n",
+                  filename,
+                  blob_name,
+                  (unsigned)written);
+    return written == line.length();
 }
 
 static const char *gv2_error_name(uint8_t code, uint8_t detail)
@@ -803,6 +896,17 @@ void gv2_uart_poll()
                                              payload_len,
                                              filename,
                                              sizeof(filename));
+                    if (saved && azure_saved_image_upload_enabled()) {
+                        char blob_name[96] = {0};
+                        make_blob_name_from_saved_path(filename, blob_name, sizeof(blob_name));
+                        bool queued = queue_azure_saved_image_upload(filename, blob_name);
+                        Serial.printf("GV2: Azure saved-image upload deferred %s file=%s blob=%s\n",
+                                      queued ? "OK" : "FAIL",
+                                      filename,
+                                      blob_name);
+                    } else if (saved) {
+                        Serial.println("GV2: Azure saved-image upload skipped");
+                    }
                 }
 
                 if (!valid)

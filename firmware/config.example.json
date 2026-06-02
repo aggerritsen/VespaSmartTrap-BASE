@@ -15,12 +15,38 @@
     "ack_frames": true
   },
   "time": {
-    "network_timeout_seconds": 10,
+    "network_timeout_seconds": 60,
     "allow_gnss_fallback": true
   },
   "modem": {
-    "mode": 0,
-    "apn": "internet.m2m",
+    "mode": 2,
+    "apn": "onomondo",
+    "apn_autodetect": true,
+    "apn_test_all": false,
+    "validate_http_egress": false,
+    "operator_auto_select": false,
+    "apn_candidates": [
+      {
+        "supplier": "Onomondo",
+        "apn": "onomondo"
+      },
+      {
+        "supplier": "KPNThings",
+        "apn": "internet.m2m"
+      },
+      {
+        "supplier": "Wireless Logic Benelux",
+        "apn": ""
+      },
+      {
+        "supplier": "ThingsData/Tele2 2G-4G",
+        "apn": "m2m.tele2.com"
+      },
+      {
+        "supplier": "ThingsData/Tele2 5G",
+        "apn": "iot.tele2.com"
+      }
+    ],
     "lookup_primary": "1.1.1.1",
     "lookup_secondary": "8.8.8.8"
   },
@@ -40,10 +66,15 @@
     "log_interval_seconds": 900,
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
-    "deep_sleep_end_hour": 6
+    "deep_sleep_end_hour": 6,
+    "reboot_cron": "",
+    "reboot_after_deep_sleep_wakeup": false
   },
   "health": {
     "led": 1
+  },
+  "azure": {
+    "max_uploads_per_boot": 3
   },
   "web": {
     "mode": 2,
