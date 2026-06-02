@@ -202,6 +202,10 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
 
 `web.mode` values are `0` for disabled, `1` for WiFi station mode, and `2` for access-point mode. `stepper.start_direction` accepts common clockwise and counter-clockwise forms such as `cw`, `clockwise`, `ccw`, and `anti-clockwise`.
 
+Azure upload is deferred. A saved detection image is queued on the SD card, then uploaded during the next POST window before the GV2 UART starts streaming. `azure.max_uploads_per_boot` is the single upload control: `0` disables queueing/uploading, while `1` to `20` queues saved detections and uploads at most that many queued files per boot. After a POST drain pass, `/azure_queue.log` is cleared completely.
+
+`power.reboot_cron` uses a five-field cron-like schedule after valid system time is available. For example, `0 12 * * *` reboots daily at noon. Leave it empty to disable scheduled reboot.
+
 ## Build And Flash The Base Firmware
 
 Install PlatformIO, connect the T-SIM7080G-S3, then run:
