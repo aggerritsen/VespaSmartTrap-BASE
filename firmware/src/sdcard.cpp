@@ -165,6 +165,69 @@ static bool merge_missing_config(JsonVariant target, JsonVariantConst defaults)
     return changed;
 }
 
+static bool profile_identity_matches(JsonObject profile, JsonObjectConst defaults)
+{
+    const char *supplier = profile["supplier"] | "";
+    const char *apn = profile["apn"] | "";
+    const char *default_supplier = defaults["supplier"] | "";
+    const char *default_apn = defaults["apn"] | "";
+
+    if (supplier[0] && default_supplier[0] && strcasecmp(supplier, default_supplier) == 0)
+        return true;
+    if (supplier[0] || default_supplier[0])
+        return false;
+    if (apn[0] && default_apn[0] && strcasecmp(apn, default_apn) == 0)
+        return true;
+
+    return false;
+}
+
+static bool merge_profile_prefix_array(JsonObject profile, JsonObjectConst defaults, const char *name)
+{
+    JsonArrayConst default_prefixes = defaults[name];
+    if (default_prefixes.isNull() || default_prefixes.size() == 0)
+        return false;
+
+    JsonArray prefixes = profile[name];
+    if (!prefixes.isNull() && prefixes.size() > 0)
+        return false;
+
+    profile[name].set(default_prefixes);
+    return true;
+}
+
+static bool merge_profile_value_default(JsonObject profile, JsonObjectConst defaults, const char *name)
+{
+    if (!profile[name].isNull() || defaults[name].isNull())
+        return false;
+
+    profile[name].set(defaults[name]);
+    return true;
+}
+
+static bool merge_sim_profile_prefix_defaults(JsonDocument &doc, JsonDocument &defaults)
+{
+    JsonArray profiles = doc["modem"]["sim_profiles"];
+    JsonArrayConst default_profiles = defaults["modem"]["sim_profiles"];
+    if (profiles.isNull() || default_profiles.isNull())
+        return false;
+
+    bool changed = false;
+    for (JsonObject profile : profiles) {
+        for (JsonObjectConst default_profile : default_profiles) {
+            if (!profile_identity_matches(profile, default_profile))
+                continue;
+
+            changed |= merge_profile_prefix_array(profile, default_profile, "imsi_prefixes");
+            changed |= merge_profile_prefix_array(profile, default_profile, "iccid_prefixes");
+            changed |= merge_profile_value_default(profile, default_profile, "direct_sms");
+            break;
+        }
+    }
+
+    return changed;
+}
+
 static bool remove_key(JsonObject obj, const char *name)
 {
     if (obj[name].isNull())
@@ -213,6 +276,7 @@ static bool ensure_config_defaults(JsonDocument &doc)
     }
 
     changed |= merge_missing_config(doc.as<JsonVariant>(), defaults.as<JsonVariantConst>());
+    changed |= merge_sim_profile_prefix_defaults(doc, defaults);
 
     return changed;
 }
@@ -287,6 +351,19 @@ static void modem_add_apn_candidate(ModemConfig &modem, const char *supplier, co
     apn_text.trim();
     strlcpy(candidate.supplier, supplier_text.length() ? supplier_text.c_str() : "unknown", sizeof(candidate.supplier));
     strlcpy(candidate.apn, apn_text.c_str(), sizeof(candidate.apn));
+}
+
+static void modem_add_sim_prefix(char prefixes[][13], uint8_t &count, const char *prefix)
+{
+    if (count >= ModemConfig::MAX_SIM_PREFIXES || !prefix || !prefix[0])
+        return;
+
+    String text = prefix;
+    text.trim();
+    if (!text.length())
+        return;
+
+    strlcpy(prefixes[count++], text.c_str(), 13);
 }
 
 static void modem_load_default_apn_candidates(ModemConfig &modem)
@@ -589,6 +666,58 @@ bool sdcard_load_config(BaseConfig &config)
     }
     if (config.modem.apn_candidate_count == 0)
         modem_load_default_apn_candidates(config.modem);
+
+    JsonArray sim_profiles = modem["sim_profiles"];
+    config.modem.sim_profile_count = 0;
+    if (!sim_profiles.isNull()) {
+        for (JsonVariant profile_value : sim_profiles) {
+            if (config.modem.sim_profile_count >= ModemConfig::MAX_SIM_PROFILES)
+                break;
+
+            JsonObject profile_json = profile_value.as<JsonObject>();
+            if (profile_json.isNull())
+                continue;
+
+            ModemConfig::SimProfile &profile = config.modem.sim_profiles[config.modem.sim_profile_count];
+            const char *supplier = profile_json["supplier"] | "unknown";
+            const char *profile_apn = profile_json["apn"] | "";
+            String supplier_text = supplier && supplier[0] ? supplier : "unknown";
+            String apn_text = profile_apn ? profile_apn : "";
+            supplier_text.trim();
+            apn_text.trim();
+            strlcpy(profile.supplier, supplier_text.length() ? supplier_text.c_str() : "unknown", sizeof(profile.supplier));
+            strlcpy(profile.apn, apn_text.c_str(), sizeof(profile.apn));
+            profile.direct_sms = profile_json["direct_sms"] | profile.direct_sms;
+
+            JsonArray imsi_prefixes = profile_json["imsi_prefixes"];
+            if (!imsi_prefixes.isNull()) {
+                for (JsonVariant prefix_value : imsi_prefixes) {
+                    if (profile.imsi_prefix_count >= ModemConfig::MAX_SIM_PREFIXES)
+                        break;
+                    const char *prefix = prefix_value | "";
+                    if (!prefix || !prefix[0])
+                        continue;
+                    String text = prefix;
+                    text.trim();
+                    if (text.length())
+                        strlcpy(profile.imsi_prefixes[profile.imsi_prefix_count++], text.c_str(), sizeof(profile.imsi_prefixes[0]));
+                }
+            }
+
+            JsonArray iccid_prefixes = profile_json["iccid_prefixes"];
+            if (!iccid_prefixes.isNull()) {
+                for (JsonVariant prefix_value : iccid_prefixes) {
+                    if (profile.iccid_prefix_count >= ModemConfig::MAX_SIM_PREFIXES)
+                        break;
+                    const char *prefix = prefix_value | "";
+                    modem_add_sim_prefix(profile.iccid_prefixes, profile.iccid_prefix_count, prefix);
+                }
+            }
+
+            if (profile.apn[0] && (profile.imsi_prefix_count > 0 || profile.iccid_prefix_count > 0))
+                config.modem.sim_profile_count++;
+        }
+    }
     if (config.modem.apn[0] && !modem_candidate_exists(config.modem, config.modem.apn)) {
         for (int i = (int)min<uint8_t>(config.modem.apn_candidate_count, ModemConfig::MAX_APN_CANDIDATES - 1); i > 0; i--)
             config.modem.apn_candidates[i] = config.modem.apn_candidates[i - 1];
@@ -647,7 +776,41 @@ bool sdcard_load_config(BaseConfig &config)
     if (config.azure.max_uploads_per_boot > 20)
         config.azure.max_uploads_per_boot = 20;
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_max_uploads_per_boot=%u time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    JsonObject sms = doc["sms"];
+    config.sms.enabled = sms["enabled"] | config.sms.enabled;
+    config.sms.post_test_enabled = sms["post_test_enabled"] | config.sms.post_test_enabled;
+    config.sms.failure_cooldown_seconds =
+        sms["failure_cooldown_seconds"] | config.sms.failure_cooldown_seconds;
+    if (config.sms.failure_cooldown_seconds > 86400)
+        config.sms.failure_cooldown_seconds = 86400;
+    config.sms.recipient_count = 0;
+    JsonArray recipients = sms["recipients"];
+    if (!recipients.isNull()) {
+        for (JsonVariant recipient_value : recipients) {
+            if (config.sms.recipient_count >= SmsConfig::MAX_RECIPIENTS)
+                break;
+
+            JsonObject recipient_json = recipient_value.as<JsonObject>();
+            if (recipient_json.isNull())
+                continue;
+
+            const char *number = recipient_json["number"] | "";
+            String number_text = number ? number : "";
+            number_text.trim();
+            if (!number_text.length())
+                continue;
+
+            const char *name = recipient_json["name"] | "";
+            String name_text = name ? name : "";
+            name_text.trim();
+
+            SmsConfig::Recipient &recipient = config.sms.recipients[config.sms.recipient_count++];
+            strlcpy(recipient.name, name_text.c_str(), sizeof(recipient.name));
+            strlcpy(recipient.number, number_text.c_str(), sizeof(recipient.number));
+        }
+    }
+
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_max_uploads_per_boot=%u sms_enabled=%s sms_post_test=%s sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -674,15 +837,21 @@ bool sdcard_load_config(BaseConfig &config)
                   config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO",
                   config.health.led,
                   config.azure.max_uploads_per_boot,
+                  config.sms.enabled ? "YES" : "NO",
+                  config.sms.post_test_enabled ? "YES" : "NO",
+                  config.sms.recipient_count,
+                  (unsigned long)config.sms.failure_cooldown_seconds,
                   config.time.network_timeout_seconds,
                   config.time.allow_gnss_fallback ? "YES" : "NO",
                   config.modem.mode,
                   config.modem.apn,
+                  config.modem.direct_sms ? "YES" : "NO",
                   config.modem.apn_autodetect ? "YES" : "NO",
                   config.modem.apn_test_all ? "YES" : "NO",
                   config.modem.validate_http_egress ? "YES" : "NO",
                   config.modem.operator_auto_select ? "YES" : "NO",
                   config.modem.apn_candidate_count,
+                  config.modem.sim_profile_count,
                   config.modem.lookup_primary,
                   config.modem.lookup_secondary);
     for (uint8_t i = 0; i < config.modem.apn_candidate_count; i++) {
@@ -691,6 +860,15 @@ bool sdcard_load_config(BaseConfig &config)
                       config.modem.apn_candidates[i].supplier,
                       config.modem.apn_candidates[i].apn[0] ? config.modem.apn_candidates[i].apn : "-",
                       config.modem.apn_candidates[i].apn[0] ? "" : " pending");
+    }
+    for (uint8_t i = 0; i < config.modem.sim_profile_count; i++) {
+        Serial.printf("SD: modem SIM profile #%u supplier=%s apn=%s direct_sms=%s imsi_prefixes=%u iccid_prefixes=%u\n",
+                      (unsigned)(i + 1),
+                      config.modem.sim_profiles[i].supplier,
+                      config.modem.sim_profiles[i].apn[0] ? config.modem.sim_profiles[i].apn : "-",
+                      config.modem.sim_profiles[i].direct_sms ? "YES" : "NO",
+                      config.modem.sim_profiles[i].imsi_prefix_count,
+                      config.modem.sim_profiles[i].iccid_prefix_count);
     }
 
     return true;

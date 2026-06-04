@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <Wire.h>
 #include <FS.h>
 #include <SD_MMC.h>
@@ -337,6 +338,21 @@ static bool send_at_expect_ok(const char *cmd, uint32_t timeout_ms)
     return response == 1;
 }
 
+static void log_operator_after_registration(const char *context)
+{
+    String cops;
+    if (!read_at_prefixed_line("+COPS?", "+COPS:", cops, 5000)) {
+        Serial.printf("MODEM: operator after registration unavailable context=%s\n",
+                      context && context[0] ? context : "-");
+        return;
+    }
+
+    cops.trim();
+    Serial.printf("MODEM: operator after registration context=%s +COPS:%s\n",
+                  context && context[0] ? context : "-",
+                  cops.c_str());
+}
+
 static int timeout_ms_to_connect_seconds(uint32_t timeout_ms)
 {
     uint32_t seconds = (timeout_ms + 999UL) / 1000UL;
@@ -393,6 +409,174 @@ static void deactivate_app_pdp_context()
     int response = modem.waitResponse(2000);
     Serial.printf("MODEM: APP PDP deactivate result=%s\n", response == 1 ? "OK" : "FAIL");
     delay(100);
+}
+
+static void reset_bearer_for_apn_probe(uint8_t attempt, const char *supplier, const char *apn)
+{
+    Serial.printf("MODEM: APN probe reset bearer attempt=%u supplier=%s apn=%s\n",
+                  (unsigned)attempt,
+                  supplier && supplier[0] ? supplier : "configured",
+                  apn && apn[0] ? apn : "-");
+    modem.gprsDisconnect();
+    deactivate_app_pdp_context();
+    deactivate_pdp_context();
+}
+
+static bool is_digits_only(const String &value)
+{
+    if (!value.length())
+        return false;
+
+    for (int i = 0; i < value.length(); i++) {
+        if (!isdigit((unsigned char)value[i]))
+            return false;
+    }
+    return true;
+}
+
+static bool read_sim_identity_value(const char *cmd, const char *label, String &value, uint32_t timeout_ms)
+{
+    value = "";
+    modem.sendAT(cmd);
+    uint32_t start = millis();
+
+    while (millis() - start < timeout_ms) {
+        while (modem.stream.available()) {
+            String line = modem.stream.readStringUntil('\n');
+            line.trim();
+            if (!line.length())
+                continue;
+
+            if (line == "OK")
+                return value.length() > 0;
+            if (line == "ERROR" || line.startsWith("+CME ERROR")) {
+                Serial.printf("MODEM: SIM identity %s unavailable line=[%s]\n", label, line.c_str());
+                modem.waitResponse(100);
+                return false;
+            }
+
+            int colon = line.indexOf(':');
+            if (colon >= 0) {
+                line = line.substring(colon + 1);
+                line.trim();
+            }
+            line.replace("\"", "");
+            line.trim();
+
+            if (is_digits_only(line)) {
+                value = line;
+                continue;
+            }
+        }
+        delay(10);
+    }
+
+    if (value.length()) {
+        modem.waitResponse(200);
+        return true;
+    }
+
+    Serial.printf("MODEM: SIM identity %s unavailable reason=timeout\n", label);
+    return false;
+}
+
+template <size_t N>
+static bool starts_with_config_prefixes(const String &value, const char (&prefixes)[ModemConfig::MAX_SIM_PREFIXES][N], uint8_t prefix_count)
+{
+    for (uint8_t i = 0; i < prefix_count && i < ModemConfig::MAX_SIM_PREFIXES; i++) {
+        if (prefixes[i][0] && value.startsWith(prefixes[i]))
+            return true;
+    }
+    return false;
+}
+
+static int find_apn_candidate_index(const ModemConfig &config, const char *supplier_fragment, const char *apn)
+{
+    for (uint8_t i = 0; i < config.apn_candidate_count; i++) {
+        const ModemConfig::ApnCandidate &candidate = config.apn_candidates[i];
+        if (apn && apn[0] && strcasecmp(candidate.apn, apn) == 0)
+            return i;
+
+        if (supplier_fragment && supplier_fragment[0]) {
+            String supplier = candidate.supplier;
+            String fragment = supplier_fragment;
+            supplier.toLowerCase();
+            fragment.toLowerCase();
+            if (supplier.indexOf(fragment) >= 0)
+                return i;
+        }
+    }
+    return -1;
+}
+
+static void move_apn_candidate_to_front(ModemConfig &config, uint8_t index)
+{
+    if (index == 0 || index >= config.apn_candidate_count)
+        return;
+
+    ModemConfig::ApnCandidate selected = config.apn_candidates[index];
+    for (int i = index; i > 0; i--)
+        config.apn_candidates[i] = config.apn_candidates[i - 1];
+    config.apn_candidates[0] = selected;
+}
+
+static bool prefer_apn_candidate_by_sim_identity(ModemConfig &config)
+{
+    String imsi;
+    String iccid;
+    bool have_imsi = read_sim_identity_value("+CIMI", "IMSI", imsi, 3000);
+    bool have_iccid = read_sim_identity_value("+CCID", "ICCID", iccid, 3000);
+
+    Serial.printf("MODEM: SIM identity imsi=%s iccid=%s\n",
+                  have_imsi ? imsi.c_str() : "-",
+                  have_iccid ? iccid.c_str() : "-");
+
+    if (!have_imsi && !have_iccid) {
+        Serial.println("MODEM: SIM identity APN preference skipped reason=identity_unavailable");
+        return false;
+    }
+
+    const ModemConfig::SimProfile *matched_profile = nullptr;
+    const char *matched_by = nullptr;
+    for (uint8_t i = 0; i < config.sim_profile_count; i++) {
+        const ModemConfig::SimProfile &profile = config.sim_profiles[i];
+        if (have_imsi && starts_with_config_prefixes(imsi, profile.imsi_prefixes, profile.imsi_prefix_count)) {
+            matched_profile = &profile;
+            matched_by = "imsi";
+            break;
+        }
+        if (have_iccid && starts_with_config_prefixes(iccid, profile.iccid_prefixes, profile.iccid_prefix_count)) {
+            matched_profile = &profile;
+            matched_by = "iccid";
+            break;
+        }
+    }
+
+    if (!matched_profile) {
+        Serial.println("MODEM: SIM identity APN preference no known profile; using configured candidate order");
+        return false;
+    }
+
+    int index = find_apn_candidate_index(config, matched_profile->supplier, matched_profile->apn);
+    if (index < 0) {
+        Serial.printf("MODEM: SIM identity profile=%s preferred_apn=%s match=%s not present in candidates\n",
+                      matched_profile->supplier,
+                      matched_profile->apn,
+                      matched_by);
+        return false;
+    }
+
+    move_apn_candidate_to_front(config, (uint8_t)index);
+    strlcpy(config.apn, config.apn_candidates[0].apn, sizeof(config.apn));
+    config.direct_sms = matched_profile->direct_sms;
+    Serial.printf("MODEM: SIM identity selected APN profile=%s supplier=%s apn=%s direct_sms=%s match=%s candidate_index=%d\n",
+                  matched_profile->supplier,
+                  config.apn_candidates[0].supplier,
+                  config.apn,
+                  config.direct_sms ? "YES" : "NO",
+                  matched_by,
+                  index + 1);
+    return true;
 }
 
 static bool ensure_automatic_operator_selection(bool allow_change)
@@ -743,7 +927,8 @@ static bool modem_validate_ltem_attempt(const char *supplier,
                                         uint32_t network_timeout_ms,
                                         uint8_t attempt,
                                         bool require_registration,
-                                        bool validate_http_egress)
+                                        bool validate_http_egress,
+                                        bool force_clean_bearer)
 {
     (void)lookup_primary;
     (void)lookup_secondary;
@@ -757,6 +942,9 @@ static bool modem_validate_ltem_attempt(const char *supplier,
                   apn,
                   validate_http_egress ? "http_egress" : "bearer_ip");
     append_apn_probe_log("begin", attempt, supplier, apn, "running", "lte_m_validation_begin");
+
+    if (force_clean_bearer)
+        reset_bearer_for_apn_probe(attempt, supplier, apn);
 
     bool data_active = modem.isGprsConnected();
     Serial.printf("MODEM: TinyGSM data active before APN configure attempt=%u active=%s\n",
@@ -866,6 +1054,7 @@ bool modem_validate_ltem(const char *apn,
                                        network_timeout_ms,
                                        1,
                                        true,
+                                       false,
                                        false);
 }
 
@@ -880,7 +1069,8 @@ bool modem_validate_ltem_apn_candidates(ModemConfig &config, uint32_t network_ti
                                            network_timeout_ms,
                                            1,
                                            true,
-                                           config.validate_http_egress);
+                                           config.validate_http_egress,
+                                           false);
     }
 
     Serial.printf("MODEM: APN autodetect begin candidates=%u configured_apn=%s\n",
@@ -889,6 +1079,8 @@ bool modem_validate_ltem_apn_candidates(ModemConfig &config, uint32_t network_ti
     append_apn_probe_log("autodetect_begin", 0, "all", config.apn, "running", "candidate_scan");
     if (config.apn_test_all)
         Serial.println("MODEM: APN test-all enabled; all usable APN candidates will be tested");
+
+    bool identity_preferred = prefer_apn_candidate_by_sim_identity(config);
 
     Serial.println("MODEM: APN autodetect waiting for network registration before APN attach tests");
     set_pdp_context_ip(config.apn);
@@ -899,6 +1091,11 @@ bool modem_validate_ltem_apn_candidates(ModemConfig &config, uint32_t network_ti
         return false;
     }
     Serial.println("MODEM: APN autodetect network registered; starting APN attach tests");
+    log_operator_after_registration("apn_autodetect");
+    if (!identity_preferred) {
+        Serial.println("MODEM: SIM identity retry after registration before APN probing");
+        identity_preferred = prefer_apn_candidate_by_sim_identity(config);
+    }
 
     uint8_t attempted = 0;
     bool selected = false;
@@ -921,7 +1118,8 @@ bool modem_validate_ltem_apn_candidates(ModemConfig &config, uint32_t network_ti
                                         network_timeout_ms,
                                         attempted,
                                         false,
-                                        config.validate_http_egress)) {
+                                        config.validate_http_egress,
+                                        true)) {
             if (!selected) {
                 selected = true;
                 strlcpy(selected_supplier, candidate.supplier[0] ? candidate.supplier : "unknown", sizeof(selected_supplier));
@@ -1204,6 +1402,58 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
     return false;
 }
 
+bool modem_send_sms_text(const char *number, const char *message)
+{
+    if (!number || !number[0] || !message || !message[0]) {
+        Serial.println("MODEM: SMS skipped reason=missing_number_or_message");
+        return false;
+    }
+
+    if (!g_serial_ready || !modem.testAT(1000)) {
+        Serial.printf("MODEM: SMS send FAIL number=%s reason=modem_not_ready\n", number);
+        return false;
+    }
+
+    Serial.printf("MODEM: SMS send begin number=%s chars=%u\n",
+                  number,
+                  (unsigned)strlen(message));
+
+    Serial.println("MODEM: SMS set text mode AT+CMGF=1");
+    modem.sendAT("+CMGF=1");
+    if (modem.waitResponse(5000) != 1) {
+        Serial.printf("MODEM: SMS send FAIL number=%s reason=cmgf_failed\n", number);
+        return false;
+    }
+
+    Serial.println("MODEM: SMS set charset AT+CSCS=\"GSM\"");
+    modem.sendAT("+CSCS=\"GSM\"");
+    if (modem.waitResponse(5000) != 1) {
+        Serial.printf("MODEM: SMS send FAIL number=%s reason=cscs_failed\n", number);
+        return false;
+    }
+
+    Serial.printf("MODEM: SMS request prompt number=%s timeout_ms=15000\n", number);
+    modem.sendAT("+CMGS=\"", number, "\"");
+    if (modem.waitResponse(15000, ">") != 1) {
+        Serial.printf("MODEM: SMS send FAIL number=%s reason=prompt_timeout\n", number);
+        modem.stream.write((char)0x1B);
+        modem.stream.flush();
+        modem.waitResponse(1000);
+        return false;
+    }
+
+    Serial.println("MODEM: SMS prompt OK; writing body");
+    modem.stream.print(message);
+    modem.stream.write((char)0x1A);
+    modem.stream.flush();
+
+    Serial.printf("MODEM: SMS waiting final response number=%s timeout_ms=30000\n", number);
+    int response = modem.waitResponse(30000);
+    bool ok = response == 1;
+    Serial.printf("MODEM: SMS send %s number=%s response=%d\n", ok ? "PASS" : "FAIL", number, response);
+    return ok;
+}
+
 bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms)
 {
     if (!out || out_len < 17)
@@ -1216,6 +1466,7 @@ bool modem_get_timestamp(char *out, size_t out_len, uint32_t network_timeout_ms)
         return false;
     }
     Serial.println("MODEM: network registered");
+    log_operator_after_registration("timestamp");
 
     for (int attempt = 0; attempt < 10; attempt++)
     {

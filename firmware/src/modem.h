@@ -41,6 +41,9 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
                                      const char *apn = nullptr,
                                      uint32_t timeout_ms = 20000);
 
+// Sends a text SMS through TinyGSM. The modem must already be initialized.
+bool modem_send_sms_text(const char *number, const char *message);
+
 struct ModemGnssInfo {
     bool command_ok = false;
     bool powered = false;

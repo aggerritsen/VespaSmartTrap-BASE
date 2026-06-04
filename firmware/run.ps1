@@ -5,5 +5,5 @@ param(
 
 pio run -t upload --upload-port $UploadPort
 if ($LASTEXITCODE -eq 0) {
-    pio device monitor -p $MonitorPort -b 115200
+    pio device monitor -p $MonitorPort -b 115200 --filter time
 }

@@ -54,10 +54,22 @@ struct TimeConfig {
 
 struct ModemConfig {
     static constexpr uint8_t MAX_APN_CANDIDATES = 6;
+    static constexpr uint8_t MAX_SIM_PROFILES = 6;
+    static constexpr uint8_t MAX_SIM_PREFIXES = 4;
 
     struct ApnCandidate {
         char supplier[33] = "";
         char apn[33] = "";
+    };
+
+    struct SimProfile {
+        char supplier[33] = "";
+        char apn[33] = "";
+        bool direct_sms = true;
+        char imsi_prefixes[MAX_SIM_PREFIXES][9] = {};
+        char iccid_prefixes[MAX_SIM_PREFIXES][13] = {};
+        uint8_t imsi_prefix_count = 0;
+        uint8_t iccid_prefix_count = 0;
     };
 
     uint8_t mode = 0; // 0=no modem, 1=time only, 2=LTE-M validated
@@ -66,8 +78,11 @@ struct ModemConfig {
     bool apn_test_all = false;
     bool validate_http_egress = false;
     bool operator_auto_select = false;
+    bool direct_sms = true;
     uint8_t apn_candidate_count = 0;
     ApnCandidate apn_candidates[MAX_APN_CANDIDATES];
+    uint8_t sim_profile_count = 0;
+    SimProfile sim_profiles[MAX_SIM_PROFILES];
     char lookup_primary[16] = "1.1.1.1";
     char lookup_secondary[16] = "8.8.8.8";
 };
@@ -78,6 +93,21 @@ struct HealthConfig {
 
 struct AzureConfig {
     uint8_t max_uploads_per_boot = 3;
+};
+
+struct SmsConfig {
+    static constexpr uint8_t MAX_RECIPIENTS = 5;
+
+    struct Recipient {
+        char name[33] = "";
+        char number[24] = "";
+    };
+
+    bool enabled = false;
+    bool post_test_enabled = true;
+    uint32_t failure_cooldown_seconds = 900;
+    uint8_t recipient_count = 0;
+    Recipient recipients[MAX_RECIPIENTS];
 };
 
 struct BaseConfig {
@@ -93,6 +123,7 @@ struct BaseConfig {
     ModemConfig modem;
     HealthConfig health;
     AzureConfig azure;
+    SmsConfig sms;
 };
 
 bool sdcard_init();

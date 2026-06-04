@@ -94,6 +94,7 @@ static Gv2UartStats stats;
 static const BaseConfig *log_config = nullptr;
 static const ModemGnssInfo *log_gnss = nullptr;
 static uint32_t azure_upload_resume_ms = 0;
+static uint32_t sms_failure_resume_ms = 0;
 
 static void shift_magic_window(uint8_t *window, uint8_t *filled, uint8_t value)
 {
@@ -509,6 +510,85 @@ static bool queue_azure_saved_image_upload(const char *filename, const char *blo
     return written == line.length();
 }
 
+static String sms_detection_message(const char *filename, size_t payload_len)
+{
+    (void)filename;
+    (void)payload_len;
+    const BaseConfig *cfg = log_config;
+    const ModemGnssInfo *gnss = log_gnss;
+    String s;
+    s.reserve(150);
+    s += "VST detection at ";
+    s += cfg ? cfg->device_name : "vst-base";
+    s += ". Time: ";
+    s += current_timestamp();
+    s += ". Class: ";
+    s += (unsigned)jpeg_rx.frame_class_idx;
+    s += ". Confidence: ";
+    s += String((float)jpeg_rx.frame_conf_u8 / 255.0f, 3);
+    s += ". GPS: ";
+    if (gnss && gnss->position_valid && gnss->latitude[0] && gnss->longitude[0]) {
+        s += gnss->latitude;
+        s += ", ";
+        s += gnss->longitude;
+    } else {
+        s += "no fix";
+    }
+    return s;
+}
+
+static void send_detection_sms_notifications(const char *filename, size_t payload_len)
+{
+    const BaseConfig *cfg = log_config;
+    if (!cfg || !cfg->sms.enabled) {
+        Serial.println("GV2: SMS notification skipped");
+        return;
+    }
+    if (cfg->sms.recipient_count == 0) {
+        Serial.println("GV2: SMS notification skipped reason=no_recipients");
+        return;
+    }
+    if (!cfg->modem.direct_sms) {
+        Serial.println("GV2: SMS notification skipped reason=provider_direct_sms_disabled");
+        return;
+    }
+
+    uint32_t now = millis();
+    if (sms_failure_resume_ms != 0 && (int32_t)(now - sms_failure_resume_ms) < 0) {
+        uint32_t remaining_ms = sms_failure_resume_ms - now;
+        Serial.printf("GV2: SMS notification skipped reason=failure_cooldown remaining_ms=%lu\n",
+                      (unsigned long)remaining_ms);
+        return;
+    }
+
+    String message = sms_detection_message(filename, payload_len);
+    for (uint8_t i = 0; i < cfg->sms.recipient_count; i++) {
+        const SmsConfig::Recipient &recipient = cfg->sms.recipients[i];
+        if (!recipient.number[0])
+            continue;
+
+        Serial.printf("GV2: SMS notification begin recipient=%s number=%s\n",
+                      recipient.name[0] ? recipient.name : "-",
+                      recipient.number);
+        bool ok = modem_send_sms_text(recipient.number, message.c_str());
+        Serial.printf("GV2: SMS notification %s recipient=%s number=%s\n",
+                      ok ? "PASS" : "FAIL",
+                      recipient.name[0] ? recipient.name : "-",
+                      recipient.number);
+        if (!ok) {
+            uint32_t cooldown_ms = (uint32_t)cfg->sms.failure_cooldown_seconds * 1000UL;
+            if (cooldown_ms > 0) {
+                sms_failure_resume_ms = millis() + cooldown_ms;
+                Serial.printf("GV2: SMS notification cooldown begin seconds=%u\n",
+                              cfg->sms.failure_cooldown_seconds);
+            }
+            break;
+        }
+
+        sms_failure_resume_ms = 0;
+    }
+}
+
 static const char *gv2_error_name(uint8_t code, uint8_t detail)
 {
     if (code == 3 && detail == 1)
@@ -896,6 +976,9 @@ void gv2_uart_poll()
                                              payload_len,
                                              filename,
                                              sizeof(filename));
+                    if (saved) {
+                        send_detection_sms_notifications(filename, payload_len);
+                    }
                     if (saved && azure_saved_image_upload_enabled()) {
                         char blob_name[96] = {0};
                         make_blob_name_from_saved_path(filename, blob_name, sizeof(blob_name));

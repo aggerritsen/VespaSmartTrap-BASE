@@ -132,6 +132,67 @@ static String current_timestamp_iso()
     return String();
 }
 
+static String post_sms_probe_message()
+{
+    String s;
+    s.reserve(120);
+    s += "VST SMS test from ";
+    s += g_config.device_name;
+    s += ". Time: ";
+    String timestamp = current_timestamp_iso();
+    s += timestamp.length() ? timestamp : "unavailable";
+    s += ". APN: ";
+    s += g_config.modem.apn[0] ? g_config.modem.apn : "-";
+    return s;
+}
+
+static bool send_post_sms_probe()
+{
+    if (!g_config.sms.enabled) {
+        print_post_warn("sms_probe", "skipped by config");
+        return false;
+    }
+    if (!g_config.sms.post_test_enabled) {
+        print_post_warn("sms_probe", "post test disabled");
+        return false;
+    }
+    if (g_config.sms.recipient_count == 0) {
+        print_post_warn("sms_probe", "no recipients");
+        return false;
+    }
+    if (!g_config.modem.direct_sms) {
+        print_post_warn("sms_probe", "skipped; selected provider direct_sms=NO");
+        return false;
+    }
+    if (!g_post.modem_ready || !g_post.modem_network) {
+        print_post_warn("sms_probe", "skipped; modem network unavailable");
+        return false;
+    }
+
+    String message = post_sms_probe_message();
+    bool all_ok = true;
+    for (uint8_t i = 0; i < g_config.sms.recipient_count; i++) {
+        const SmsConfig::Recipient &recipient = g_config.sms.recipients[i];
+        if (!recipient.number[0])
+            continue;
+
+        Serial.printf("POST: SMS probe begin recipient=%s number=%s\n",
+                      recipient.name[0] ? recipient.name : "-",
+                      recipient.number);
+        bool ok = modem_send_sms_text(recipient.number, message.c_str());
+        Serial.printf("POST: SMS probe %s recipient=%s number=%s\n",
+                      ok ? "PASS" : "FAIL",
+                      recipient.name[0] ? recipient.name : "-",
+                      recipient.number);
+        all_ok = all_ok && ok;
+        if (!ok)
+            break;
+    }
+
+    print_post_line("sms_probe", all_ok);
+    return all_ok;
+}
+
 static String current_timestamp_compact()
 {
     char buf[32];
@@ -394,6 +455,9 @@ static String make_post_summary_text()
     s += "modem_apn=";
     s += g_config.modem.apn;
     s += "\n";
+    s += "modem_direct_sms=";
+    s += g_config.modem.direct_sms ? "YES" : "NO";
+    s += "\n";
     s += "modem_apn_autodetect=";
     s += g_config.modem.apn_autodetect ? "YES" : "NO";
     s += "\n";
@@ -604,9 +668,10 @@ static void print_post_summary()
     Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
     Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
     Serial.printf("POST: health_led       [%u]\n", g_config.health.led);
-    Serial.printf("POST: modem_mode      [%u] apn=[%s] apn_autodetect=[%s] apn_test_all=[%s] validate_http_egress=[%s] operator_auto_select=[%s] candidates=[%u] lookup=[%s,%s]\n",
+    Serial.printf("POST: modem_mode      [%u] apn=[%s] direct_sms=[%s] apn_autodetect=[%s] apn_test_all=[%s] validate_http_egress=[%s] operator_auto_select=[%s] candidates=[%u] lookup=[%s,%s]\n",
                   g_config.modem.mode,
                   g_config.modem.apn,
+                  g_config.modem.direct_sms ? "YES" : "NO",
                   g_config.modem.apn_autodetect ? "YES" : "NO",
                   g_config.modem.apn_test_all ? "YES" : "NO",
                   g_config.modem.validate_http_egress ? "YES" : "NO",
@@ -1529,6 +1594,9 @@ void setup()
 
         if (g_config.modem.mode == 2)
             print_post_warn("azure_upload", g_post.modem_ltem ? "post probe disabled" : "skipped; LTE-M unavailable");
+
+        if (g_config.modem.mode != 0)
+            send_post_sms_probe();
 
         if (g_config.modem.mode == 2 && g_post.modem_ltem) {
             uint8_t uploaded = drain_azure_upload_queue();

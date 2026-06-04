@@ -24,7 +24,7 @@
     "apn_autodetect": true,
     "apn_test_all": false,
     "validate_http_egress": false,
-    "operator_auto_select": false,
+    "operator_auto_select": true,
     "apn_candidates": [
       {
         "supplier": "Onomondo",
@@ -47,6 +47,29 @@
         "apn": "iot.tele2.com"
       }
     ],
+    "sim_profiles": [
+      {
+        "supplier": "Onomondo",
+        "apn": "onomondo",
+        "direct_sms": false,
+        "imsi_prefixes": ["23450", "23873"],
+        "iccid_prefixes": ["894573"]
+      },
+      {
+        "supplier": "KPNThings",
+        "apn": "internet.m2m",
+        "direct_sms": true,
+        "imsi_prefixes": ["20408"],
+        "iccid_prefixes": []
+      },
+      {
+        "supplier": "ThingsData/Tele2 2G-4G",
+        "apn": "m2m.tele2.com",
+        "direct_sms": true,
+        "imsi_prefixes": ["20402", "24007"],
+        "iccid_prefixes": ["894620"]
+      }
+    ],
     "lookup_primary": "1.1.1.1",
     "lookup_secondary": "8.8.8.8"
   },
@@ -58,7 +81,7 @@
     "start_direction": "ccw"
   },
   "inference": {
-    "confidence_threshold": 0.89,
+    "confidence_threshold": 0.80,
     "detected_class": 3,
     "occurrence": 3
   },
@@ -75,6 +98,12 @@
   },
   "azure": {
     "max_uploads_per_boot": 3
+  },
+  "sms": {
+    "enabled": false,
+    "post_test_enabled": true,
+    "failure_cooldown_seconds": 900,
+    "recipients": []
   },
   "web": {
     "mode": 2,
