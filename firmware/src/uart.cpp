@@ -94,7 +94,21 @@ static Gv2UartStats stats;
 static const BaseConfig *log_config = nullptr;
 static const ModemGnssInfo *log_gnss = nullptr;
 static uint32_t azure_upload_resume_ms = 0;
+static uint32_t sms_resume_ms = 0;
 static uint32_t sms_failure_resume_ms = 0;
+static bool sms_pending = false;
+static uint32_t sms_pending_due_ms = 0;
+static String sms_pending_message;
+
+struct SmsNotifyResult {
+    const char *status;
+    uint32_t cooldown_remaining_s;
+
+    SmsNotifyResult(const char *status_value = "not_applicable", uint32_t remaining_s = 0)
+        : status(status_value),
+          cooldown_remaining_s(remaining_s)
+    {}
+};
 
 static void shift_magic_window(uint8_t *window, uint8_t *filled, uint8_t value)
 {
@@ -386,6 +400,37 @@ static void gv2_resume_after_modem_upload()
                   (unsigned long)discarded);
 }
 
+static void gv2_pause_uart_for_sms()
+{
+    reset_uart_sync_windows();
+    uint32_t discarded = flush_gv2_uart_until_quiet(20, 150);
+    Gv2Serial.end();
+
+    pinMode(active_config.rx_gpio, INPUT);
+    pinMode(active_config.tx_gpio, INPUT);
+
+    Serial.printf("GV2: UART paused for SMS discarded=%lu bytes rx=%u tx=%u\n",
+                  (unsigned long)discarded,
+                  (unsigned)active_config.rx_gpio,
+                  (unsigned)active_config.tx_gpio);
+}
+
+static void gv2_resume_uart_after_sms()
+{
+    size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
+    Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
+    Gv2Serial.setRxTimeout(1);
+    delay(50);
+    uint32_t discarded = flush_gv2_uart_until_quiet(20, 350);
+    reset_uart_sync_windows();
+    Serial.printf("GV2: UART resumed after SMS RX=%d TX=%d baud=%lu rx_buffer=%u discarded=%lu\n",
+                  active_config.rx_gpio,
+                  active_config.tx_gpio,
+                  (unsigned long)active_config.baud,
+                  (unsigned)rx_buffer,
+                  (unsigned long)discarded);
+}
+
 void gv2_prepare_for_sleep(const UartConfig &config)
 {
     abort_active_jpeg();
@@ -537,31 +582,54 @@ static String sms_detection_message(const char *filename, size_t payload_len)
     return s;
 }
 
-static void send_detection_sms_notifications(const char *filename, size_t payload_len)
+static SmsNotifyResult send_sms_message_now(const String &message, const char *source)
 {
     const BaseConfig *cfg = log_config;
     if (!cfg || !cfg->sms.enabled) {
-        Serial.println("GV2: SMS notification skipped");
-        return;
+        Serial.println("GV2: SMS notification skipped reason=disabled");
+        return {"skipped_disabled", 0};
     }
     if (cfg->sms.recipient_count == 0) {
         Serial.println("GV2: SMS notification skipped reason=no_recipients");
-        return;
+        return {"skipped_no_recipients", 0};
     }
     if (!cfg->modem.direct_sms) {
         Serial.println("GV2: SMS notification skipped reason=provider_direct_sms_disabled");
-        return;
+        return {"skipped_provider", 0};
     }
 
     uint32_t now = millis();
+    if (sms_resume_ms != 0 && (int32_t)(now - sms_resume_ms) < 0) {
+        uint32_t remaining_ms = sms_resume_ms - now;
+        uint32_t remaining_s = (remaining_ms + 999UL) / 1000UL;
+        Serial.printf("GV2: SMS notification skipped reason=cooldown remaining_s=%lu\n",
+                      (unsigned long)remaining_s);
+        return {"skipped_cooldown", remaining_s};
+    }
     if (sms_failure_resume_ms != 0 && (int32_t)(now - sms_failure_resume_ms) < 0) {
         uint32_t remaining_ms = sms_failure_resume_ms - now;
-        Serial.printf("GV2: SMS notification skipped reason=failure_cooldown remaining_ms=%lu\n",
-                      (unsigned long)remaining_ms);
-        return;
+        uint32_t remaining_s = (remaining_ms + 999UL) / 1000UL;
+        Serial.printf("GV2: SMS notification skipped reason=failure_cooldown remaining_s=%lu\n",
+                      (unsigned long)remaining_s);
+        return {"skipped_failure_cooldown", remaining_s};
     }
 
-    String message = sms_detection_message(filename, payload_len);
+    Serial.printf("GV2: SMS notification runtime send source=%s\n",
+                  source && source[0] ? source : "detection");
+    if (cfg->sms.cooldown_minutes > 0) {
+        uint64_t cooldown_ms64 = (uint64_t)cfg->sms.cooldown_minutes * 60ULL * 1000ULL;
+        if (cooldown_ms64 > UINT32_MAX)
+            cooldown_ms64 = UINT32_MAX;
+        sms_resume_ms = now + (uint32_t)cooldown_ms64;
+        Serial.printf("GV2: SMS notification cooldown begin minutes=%lu\n",
+                      (unsigned long)cfg->sms.cooldown_minutes);
+    }
+    gv2_pause_uart_for_sms();
+    if (cfg->sms.runtime_settle_ms > 0) {
+        Serial.printf("GV2: SMS runtime settle begin ms=%u\n", cfg->sms.runtime_settle_ms);
+        delay(cfg->sms.runtime_settle_ms);
+    }
+    bool all_ok = true;
     for (uint8_t i = 0; i < cfg->sms.recipient_count; i++) {
         const SmsConfig::Recipient &recipient = cfg->sms.recipients[i];
         if (!recipient.number[0])
@@ -570,12 +638,18 @@ static void send_detection_sms_notifications(const char *filename, size_t payloa
         Serial.printf("GV2: SMS notification begin recipient=%s number=%s\n",
                       recipient.name[0] ? recipient.name : "-",
                       recipient.number);
-        bool ok = modem_send_sms_text(recipient.number, message.c_str());
+        bool ok = modem_send_sms_text_runtime(recipient.number,
+                                              message.c_str(),
+                                              cfg->modem.apn,
+                                              cfg->modem.operator_auto_select,
+                                              cfg->modem.wake_for_runtime_sms,
+                                              cfg->sms.runtime_submit_timeout_ms);
         Serial.printf("GV2: SMS notification %s recipient=%s number=%s\n",
                       ok ? "PASS" : "FAIL",
                       recipient.name[0] ? recipient.name : "-",
                       recipient.number);
         if (!ok) {
+            all_ok = false;
             uint32_t cooldown_ms = (uint32_t)cfg->sms.failure_cooldown_seconds * 1000UL;
             if (cooldown_ms > 0) {
                 sms_failure_resume_ms = millis() + cooldown_ms;
@@ -587,6 +661,51 @@ static void send_detection_sms_notifications(const char *filename, size_t payloa
 
         sms_failure_resume_ms = 0;
     }
+    gv2_resume_uart_after_sms();
+    return {all_ok ? "sent" : "failed", 0};
+}
+
+static void process_pending_sms_notification()
+{
+    if (!sms_pending)
+        return;
+
+    uint32_t now = millis();
+    if ((int32_t)(now - sms_pending_due_ms) < 0)
+        return;
+
+    String message = sms_pending_message;
+    sms_pending = false;
+    sms_pending_message = "";
+    Serial.println("GV2: SMS notification delayed attempt due");
+    send_sms_message_now(message, "delayed_detection");
+}
+
+static SmsNotifyResult send_detection_sms_notifications(const char *filename, size_t payload_len)
+{
+    const BaseConfig *cfg = log_config;
+    String message = sms_detection_message(filename, payload_len);
+
+    if (cfg && cfg->sms.runtime_delay_after_detection_seconds > 0) {
+        if (sms_pending) {
+            int32_t remaining_ms = (int32_t)(sms_pending_due_ms - millis());
+            if (remaining_ms < 0)
+                remaining_ms = 0;
+            Serial.printf("GV2: SMS notification delayed skipped reason=already_pending remaining_ms=%ld\n",
+                          (long)remaining_ms);
+            return {"skipped_already_pending", (uint32_t)((remaining_ms + 999) / 1000)};
+        }
+
+        uint32_t delay_ms = (uint32_t)cfg->sms.runtime_delay_after_detection_seconds * 1000UL;
+        sms_pending_message = message;
+        sms_pending_due_ms = millis() + delay_ms;
+        sms_pending = true;
+        Serial.printf("GV2: SMS notification delayed scheduled seconds=%u\n",
+                      cfg->sms.runtime_delay_after_detection_seconds);
+        return {"scheduled", cfg->sms.runtime_delay_after_detection_seconds};
+    }
+
+    return send_sms_message_now(message, "detection");
 }
 
 static const char *gv2_error_name(uint8_t code, uint8_t detail)
@@ -690,7 +809,16 @@ static bool read_heartbeat_payload()
     return true;
 }
 
-static void append_frame_log(bool saved, bool valid, bool filter_match, bool detection_match, bool actuated, bool crc_ok, uint32_t crc_actual, size_t payload_len, const char *filename)
+static void append_frame_log(bool saved,
+                             bool valid,
+                             bool filter_match,
+                             bool detection_match,
+                             bool actuated,
+                             bool crc_ok,
+                             uint32_t crc_actual,
+                             size_t payload_len,
+                             const char *filename,
+                             const SmsNotifyResult &sms_result)
 {
     const BaseConfig *cfg = log_config;
     const ModemGnssInfo *gnss = log_gnss;
@@ -782,6 +910,10 @@ static void append_frame_log(bool saved, bool valid, bool filter_match, bool det
     s += detection_match ? "true" : "false";
     s += ",\"activated\":";
     s += actuated ? "true" : "false";
+    s += "},\"sms\":{";
+    append_json_field(s, "status", sms_result.status ? sms_result.status : "not_applicable");
+    s += ",\"cooldown_remaining_s\":";
+    s += (unsigned long)sms_result.cooldown_remaining_s;
     s += "}}\n";
 
     sdcard_append_log(FRAME_LOG_PATH, s);
@@ -887,8 +1019,39 @@ bool gv2_uart_init(const UartConfig &config)
     return true;
 }
 
+bool gv2_uart_recover(const UartConfig &config)
+{
+    active_config = config;
+    if (active_config.baud == 0)
+        active_config.baud = GV2_UART_BAUD_CFG;
+
+    abort_active_jpeg();
+    reset_uart_sync_windows();
+    Gv2Serial.end();
+    pinMode(active_config.rx_gpio, INPUT);
+    pinMode(active_config.tx_gpio, INPUT);
+    delay(50);
+
+    size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
+    Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
+    Gv2Serial.setRxTimeout(1);
+    delay(100);
+    uint32_t discarded = flush_gv2_uart_until_quiet(20, 250);
+    reset_uart_sync_windows();
+    Serial.printf("GV2: UART recovery RX=%d TX=%d baud=%lu rx_buffer=%u discarded=%lu\n",
+                  active_config.rx_gpio,
+                  active_config.tx_gpio,
+                  (unsigned long)active_config.baud,
+                  (unsigned)rx_buffer,
+                  (unsigned long)discarded);
+    return true;
+}
+
 void gv2_uart_poll()
 {
+    if (!jpeg_rx.receiving_jpeg && !jpeg_rx.waiting_jpeg_header)
+        process_pending_sms_notification();
+
     while (Gv2Serial.available() > 0) {
         if (state_rx.waiting_state_payload) {
             int state = Gv2Serial.read();
@@ -962,6 +1125,7 @@ void gv2_uart_poll()
                 bool actuated = false;
                 char filename[64] = {0};
                 bool saved = false;
+                SmsNotifyResult sms_result;
 
                 if (detection_match) {
                     actuated = stepper_run_configured_cycle();
@@ -977,7 +1141,7 @@ void gv2_uart_poll()
                                              filename,
                                              sizeof(filename));
                     if (saved) {
-                        send_detection_sms_notifications(filename, payload_len);
+                        sms_result = send_detection_sms_notifications(filename, payload_len);
                     }
                     if (saved && azure_saved_image_upload_enabled()) {
                         char blob_name[96] = {0};
@@ -997,7 +1161,16 @@ void gv2_uart_poll()
                 else
                     stats.camera_error_active = false;
 
-                append_frame_log(saved, valid, filter_match, detection_match, actuated, crc_ok, crc_actual, payload_len, saved ? filename : "");
+                append_frame_log(saved,
+                                 valid,
+                                 filter_match,
+                                 detection_match,
+                                 actuated,
+                                 crc_ok,
+                                 crc_actual,
+                                 payload_len,
+                                 saved ? filename : "",
+                                 sms_result);
 
                 WebFrameInfo web_info;
                 web_info.frame_id = jpeg_rx.image_counter;
@@ -1024,7 +1197,7 @@ void gv2_uart_poll()
 
                 jpeg_rx.receiving_jpeg = false;
                 stats.jpeg_frames++;
-                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s occurrence=%u/%u detection_match=%s saved=%s file=%s actuator=%s soi=%02X%02X eoi=%02X%02X\n",
+                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s occurrence=%u/%u detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
                               (unsigned long)jpeg_rx.image_counter,
                               (unsigned long)jpeg_rx.frame_len,
                               (unsigned)payload_len,
@@ -1048,6 +1221,8 @@ void gv2_uart_poll()
                               saved ? "YES" : "NO",
                               saved ? filename : "",
                               detection_match ? (actuated ? "activated" : "failed") : "skipped",
+                              sms_result.status ? sms_result.status : "not_applicable",
+                              (unsigned long)sms_result.cooldown_remaining_s,
                               jpeg_rx.frame_len >= 2 ? jpeg_rx.jpeg_buf[0] : 0,
                               jpeg_rx.frame_len >= 2 ? jpeg_rx.jpeg_buf[1] : 0,
                               payload_len >= 2 ? jpeg_rx.jpeg_buf[payload_len - 2] : 0,
@@ -1103,6 +1278,9 @@ void gv2_uart_poll()
         jpeg_rx.waiting_jpeg_header = true;
         (void)read_jpeg_header();
     }
+
+    if (!jpeg_rx.receiving_jpeg && !jpeg_rx.waiting_jpeg_header)
+        process_pending_sms_notification();
 }
 
 const Gv2UartStats &gv2_uart_stats()

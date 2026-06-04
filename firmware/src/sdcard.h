@@ -7,6 +7,7 @@ struct StepperConfig {
     uint16_t steps_per_revolution = 2048;
     uint16_t reverse_wait_ms = 1000;
     char start_direction[17] = "ccw";
+    bool post_test_enabled = false;
 };
 
 struct UartConfig {
@@ -79,6 +80,8 @@ struct ModemConfig {
     bool validate_http_egress = false;
     bool operator_auto_select = false;
     bool direct_sms = true;
+    bool keep_alive_after_post = false;
+    bool wake_for_runtime_sms = true;
     uint8_t apn_candidate_count = 0;
     ApnCandidate apn_candidates[MAX_APN_CANDIDATES];
     uint8_t sim_profile_count = 0;
@@ -104,7 +107,11 @@ struct SmsConfig {
     };
 
     bool enabled = false;
-    bool post_test_enabled = true;
+    bool post_test_enabled = false;
+    uint16_t runtime_settle_ms = 2000;
+    uint16_t runtime_delay_after_detection_seconds = 0;
+    uint32_t runtime_submit_timeout_ms = 60000;
+    uint32_t cooldown_minutes = 15;
     uint32_t failure_cooldown_seconds = 900;
     uint8_t recipient_count = 0;
     Recipient recipients[MAX_RECIPIENTS];

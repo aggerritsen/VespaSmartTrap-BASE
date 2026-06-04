@@ -53,6 +53,7 @@ static XPowersPMU PMU;
 static TinyGsm modem(Serial1);
 static bool g_pmu_ready = false;
 static bool g_serial_ready = false;
+static bool g_modem_initialized = false;
 static constexpr const char *MODEM_HEALTH_LOG_PATH = "/health.log";
 
 static bool is_plausible_year(int year)
@@ -790,7 +791,7 @@ static void print_at_raw_response(const char *label, const char *cmd, uint32_t t
 
             Serial.printf("MODEM: %s rx [%s]\n", label, line.c_str());
             printed = true;
-            if (line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR"))
+            if (line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR"))
                 return;
         }
         delay(10);
@@ -872,9 +873,13 @@ static bool modem_ping_host(const char *host)
 
 bool modem_init_early(bool operator_auto_select)
 {
-    static bool done = false;
-    if (done) return true;
-    done = true;
+    if (g_modem_initialized && g_serial_ready && modem.testAT(1000))
+        return true;
+
+    if (g_serial_ready)
+        Serial1.end();
+    g_serial_ready = false;
+    g_modem_initialized = false;
 
     if (!pmu_enable_modem_rails())
         return false;
@@ -917,6 +922,7 @@ bool modem_init_early(bool operator_auto_select)
 
     ensure_automatic_operator_selection(operator_auto_select);
 
+    g_modem_initialized = true;
     return true;
 }
 
@@ -1402,7 +1408,55 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
     return false;
 }
 
-bool modem_send_sms_text(const char *number, const char *message)
+static int wait_sms_final_response_raw(uint32_t timeout_ms)
+{
+    uint32_t start_ms = millis();
+    String line;
+    line.reserve(96);
+    bool saw_cmgs = false;
+
+    while (millis() - start_ms < timeout_ms) {
+        while (modem.stream.available() > 0) {
+            char c = (char)modem.stream.read();
+            if (c == '\r')
+                continue;
+
+            if (c == '\n') {
+                line.trim();
+                if (line.length() > 0) {
+                    Serial.printf("MODEM: SMS final rx [%s]\n", line.c_str());
+                    if (line.startsWith("+CMGS:"))
+                        saw_cmgs = true;
+                    if (line == "OK")
+                        return 1;
+                    if (line.indexOf("ERROR") >= 0)
+                        return -1;
+                }
+                line = "";
+                continue;
+            }
+
+            if (line.length() < 180) {
+                if ((uint8_t)c >= 0x20 && (uint8_t)c <= 0x7E)
+                    line += c;
+                else {
+                    char escaped[6];
+                    snprintf(escaped, sizeof(escaped), "<%02X>", (unsigned)(uint8_t)c);
+                    line += escaped;
+                }
+            }
+        }
+        delay(5);
+    }
+
+    line.trim();
+    if (line.length() > 0)
+        Serial.printf("MODEM: SMS final rx partial [%s]\n", line.c_str());
+    Serial.printf("MODEM: SMS final response timeout saw_cmgs=%s\n", saw_cmgs ? "YES" : "NO");
+    return saw_cmgs ? 1 : 0;
+}
+
+bool modem_send_sms_text(const char *number, const char *message, uint32_t submit_timeout_ms)
 {
     if (!number || !number[0] || !message || !message[0]) {
         Serial.println("MODEM: SMS skipped reason=missing_number_or_message");
@@ -1417,6 +1471,9 @@ bool modem_send_sms_text(const char *number, const char *message)
     Serial.printf("MODEM: SMS send begin number=%s chars=%u\n",
                   number,
                   (unsigned)strlen(message));
+
+    modem.sendAT("+CMEE=2");
+    modem.waitResponse(2000);
 
     Serial.println("MODEM: SMS set text mode AT+CMGF=1");
     modem.sendAT("+CMGF=1");
@@ -1447,10 +1504,51 @@ bool modem_send_sms_text(const char *number, const char *message)
     modem.stream.write((char)0x1A);
     modem.stream.flush();
 
-    Serial.printf("MODEM: SMS waiting final response number=%s timeout_ms=30000\n", number);
-    int response = modem.waitResponse(30000);
+    if (submit_timeout_ms < 30000)
+        submit_timeout_ms = 30000;
+    if (submit_timeout_ms > 120000)
+        submit_timeout_ms = 120000;
+
+    Serial.printf("MODEM: SMS waiting final response number=%s timeout_ms=%lu\n",
+                  number,
+                  (unsigned long)submit_timeout_ms);
+    int response = wait_sms_final_response_raw(submit_timeout_ms);
     bool ok = response == 1;
     Serial.printf("MODEM: SMS send %s number=%s response=%d\n", ok ? "PASS" : "FAIL", number, response);
+    return ok;
+}
+
+bool modem_send_sms_text_runtime(const char *number,
+                                 const char *message,
+                                 const char *apn,
+                                 bool operator_auto_select,
+                                 bool wake_if_needed,
+                                 uint32_t submit_timeout_ms)
+{
+    bool woke_for_sms = false;
+    if (!g_serial_ready || !modem.testAT(1000)) {
+        if (!wake_if_needed) {
+            Serial.println("MODEM: SMS runtime skipped reason=modem_off_wake_disabled");
+            return false;
+        }
+
+        Serial.println("MODEM: SMS runtime wake begin");
+        if (!modem_init_early(operator_auto_select)) {
+            Serial.println("MODEM: SMS runtime wake FAIL");
+            return false;
+        }
+        woke_for_sms = true;
+        Serial.println("MODEM: SMS runtime wake OK");
+    }
+
+    Serial.println("MODEM: SMS runtime registration check begin");
+    bool registered = wait_for_network_registration(10000);
+    Serial.printf("MODEM: SMS runtime registration check result=%s\n", registered ? "OK" : "FAIL");
+
+    bool ok = modem_send_sms_text(number, message, submit_timeout_ms);
+    (void)apn;
+    if (woke_for_sms)
+        modem_power_down_runtime(ok ? "runtime_sms_done" : "runtime_sms_failed");
     return ok;
 }
 
@@ -1573,6 +1671,27 @@ bool modem_gnss_probe(ModemGnssInfo &info, uint32_t sample_ms)
     return info.command_ok;
 }
 
+void modem_power_down_runtime(const char *reason)
+{
+    (void)reason;
+
+    if (g_serial_ready) {
+        modem.sendAT("+CGNSPWR=0");
+        modem.waitResponse(1000);
+        modem.sendAT("+CPOWD=1");
+        modem.waitResponse(3000);
+        Serial1.end();
+        g_serial_ready = false;
+    }
+
+    if (g_pmu_ready) {
+        PMU.disableBLDO2();
+        PMU.disableDC3();
+    }
+
+    g_modem_initialized = false;
+}
+
 void modem_prepare_for_sleep()
 {
     Serial.println("MODEM: preparing for deep sleep");
@@ -1582,6 +1701,8 @@ void modem_prepare_for_sleep()
         modem.waitResponse(2000);
         modem.sendAT("+CPOWD=1");
         modem.waitResponse(3000);
+        Serial1.end();
+        g_serial_ready = false;
     }
 
     if (g_pmu_ready) {
@@ -1591,5 +1712,6 @@ void modem_prepare_for_sleep()
     } else {
         Serial.println("MODEM: PMU was not ready; rails not changed");
     }
+    g_modem_initialized = false;
     Serial.flush();
 }

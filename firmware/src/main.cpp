@@ -29,6 +29,7 @@ struct PostResult {
     bool modem_network = false;
     bool modem_ltem = false;
     bool modem_http = false;
+    bool modem_powered_down = false;
     bool azure_upload = false;
     bool modem_time = false;
     bool gnss_time = false;
@@ -666,6 +667,7 @@ static void print_post_summary()
                   g_config.features.ack_frames ? "YES" : "NO");
     Serial.printf("POST: stepper_wait_ms   [%u]\n", g_config.stepper.reverse_wait_ms);
     Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
+    Serial.printf("POST: stepper_post_test [%s]\n", g_config.stepper.post_test_enabled ? "YES" : "NO");
     Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
     Serial.printf("POST: health_led       [%u]\n", g_config.health.led);
     Serial.printf("POST: modem_mode      [%u] apn=[%s] direct_sms=[%s] apn_autodetect=[%s] apn_test_all=[%s] validate_http_egress=[%s] operator_auto_select=[%s] candidates=[%u] lookup=[%s,%s]\n",
@@ -1172,6 +1174,8 @@ static bool modem_health_ok()
 {
     if (g_config.modem.mode == 0)
         return true;
+    if (g_post.modem_powered_down && !g_config.modem.keep_alive_after_post)
+        return true;
     if (!g_post.modem_ready)
         return false;
     if (g_config.modem.mode == 1)
@@ -1182,6 +1186,8 @@ static bool modem_health_ok()
 static void refresh_modem_health()
 {
     if (g_config.modem.mode == 0)
+        return;
+    if (g_post.modem_powered_down && !g_config.modem.keep_alive_after_post)
         return;
 
     if (!g_post.modem_ready) {
@@ -1374,6 +1380,7 @@ static String make_health_log_line(uint32_t now,
 static bool diagnose_and_print_health()
 {
     static uint32_t last_ms = 0;
+    static uint8_t gv2_uart_recovery_attempts = 0;
     uint32_t now = millis();
     constexpr uint32_t interval_ms = 60000UL;
 
@@ -1402,6 +1409,15 @@ static bool diagnose_and_print_health()
     refresh_modem_health();
 
     g_health.no_uart_comm = !g_post.gv2_uart || delta_bytes == 0;
+    if (g_health.no_uart_comm && g_post.gv2_uart && gv2_uart_recovery_attempts < 3) {
+        gv2_uart_recovery_attempts++;
+        Serial.printf("HEALTH: GV2 UART recovery attempt=%u reason=no_uart_comm\n",
+                      (unsigned)gv2_uart_recovery_attempts);
+        g_post.gv2_uart = gv2_uart_recover(g_config.uart);
+    } else if (!g_health.no_uart_comm && gv2_uart_recovery_attempts != 0) {
+        Serial.println("HEALTH: GV2 UART recovery cleared by traffic");
+        gv2_uart_recovery_attempts = 0;
+    }
     g_health.no_inference_detection = !g_health.no_uart_comm &&
                                       delta_jpegs == 0 &&
                                       delta_heartbeats == 0 &&
@@ -1633,6 +1649,11 @@ void setup()
                 print_post_warn("gnss_timestamp", g_gnss.utc_valid ? "GNSS UTC stale/no fix" : "trusted GNSS time unavailable");
             }
         }
+
+        if (!g_config.modem.keep_alive_after_post) {
+            modem_power_down_runtime("post_complete");
+            g_post.modem_powered_down = true;
+        }
     } else if (g_config.modem.mode != 0) {
         print_post_line("modem_at", false);
     }
@@ -1647,7 +1668,11 @@ void setup()
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
 
     stepper_init(g_config.stepper);
-    stepper_run_post_test_cycle();
+    if (g_config.stepper.post_test_enabled) {
+        stepper_run_post_test_cycle();
+    } else {
+        Serial.println("STEPPER: POST test cycle skipped by config");
+    }
 
     gv2_power_on();
     g_post.gv2_uart = gv2_uart_init(g_config.uart);

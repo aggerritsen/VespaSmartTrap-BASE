@@ -25,6 +25,8 @@
     "apn_test_all": false,
     "validate_http_egress": false,
     "operator_auto_select": true,
+    "keep_alive_after_post": false,
+    "wake_for_runtime_sms": true,
     "apn_candidates": [
       {
         "supplier": "Onomondo",
@@ -78,7 +80,8 @@
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
     "reverse_wait_ms": 1000,
-    "start_direction": "ccw"
+    "start_direction": "ccw",
+    "post_test_enabled": false
   },
   "inference": {
     "confidence_threshold": 0.80,
@@ -101,7 +104,11 @@
   },
   "sms": {
     "enabled": false,
-    "post_test_enabled": true,
+    "post_test_enabled": false,
+    "runtime_settle_ms": 2000,
+    "runtime_delay_after_detection_seconds": 0,
+    "runtime_submit_timeout_ms": 60000,
+    "cooldown_minutes": 15,
     "failure_cooldown_seconds": 900,
     "recipients": []
   },

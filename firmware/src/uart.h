@@ -28,6 +28,7 @@ struct Gv2UartStats {
 };
 
 bool gv2_uart_init(const UartConfig &config);
+bool gv2_uart_recover(const UartConfig &config);
 void gv2_uart_set_log_context(const BaseConfig *config, const ModemGnssInfo *gnss);
 void gv2_power_on();
 void gv2_prepare_for_sleep(const UartConfig &config);

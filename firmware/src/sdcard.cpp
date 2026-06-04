@@ -275,10 +275,65 @@ static bool ensure_config_defaults(JsonDocument &doc)
         return changed;
     }
 
+    JsonArray sms_recipients = doc["sms"]["recipients"];
+    bool sms_recipients_present = !sms_recipients.isNull() && sms_recipients.size() > 0;
+
     changed |= merge_missing_config(doc.as<JsonVariant>(), defaults.as<JsonVariantConst>());
     changed |= merge_sim_profile_prefix_defaults(doc, defaults);
+    if (sms_recipients_present && !doc["sms"]["enabled"].as<bool>()) {
+        doc["sms"]["enabled"] = true;
+        changed = true;
+    }
 
     return changed;
+}
+
+static String strip_json_trailing_commas(const String &text)
+{
+    String cleaned;
+    cleaned.reserve(text.length());
+
+    for (size_t i = 0; i < text.length(); i++) {
+        char c = text[i];
+        if (c != ',') {
+            cleaned += c;
+            continue;
+        }
+
+        size_t j = i + 1;
+        while (j < text.length()) {
+            char n = text[j];
+            if (n != ' ' && n != '\t' && n != '\r' && n != '\n')
+                break;
+            j++;
+        }
+
+        if (j < text.length() && (text[j] == '}' || text[j] == ']'))
+            continue;
+
+        cleaned += c;
+    }
+
+    return cleaned;
+}
+
+static DeserializationError parse_config_text(JsonDocument &doc, const String &text, bool &repaired)
+{
+    repaired = false;
+    DeserializationError err = deserializeJson(doc, text);
+    if (!err)
+        return err;
+
+    String cleaned = strip_json_trailing_commas(text);
+    if (cleaned == text)
+        return err;
+
+    doc.clear();
+    DeserializationError repaired_err = deserializeJson(doc, cleaned);
+    if (!repaired_err)
+        repaired = true;
+
+    return repaired_err;
 }
 
 static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id)
@@ -447,9 +502,11 @@ bool sdcard_ensure_config()
             return false;
         }
 
-        JsonDocument doc;
-        DeserializationError err = deserializeJson(doc, f);
+        String text = f.readString();
         f.close();
+        JsonDocument doc;
+        bool parse_repaired = false;
+        DeserializationError err = parse_config_text(doc, text, parse_repaired);
         if (err)
         {
             Serial.printf("SD: config parse FAILED path=%s error=%s\n",
@@ -458,7 +515,9 @@ bool sdcard_ensure_config()
             return false;
         }
 
-        if (!ensure_config_defaults(doc))
+        bool changed = parse_repaired;
+        changed |= ensure_config_defaults(doc);
+        if (!changed)
             return true;
 
         if (SD_MMC.exists(CONFIG_PATH))
@@ -481,7 +540,7 @@ bool sdcard_ensure_config()
         }
         f.println();
         f.close();
-        Serial.printf("SD: config updated with missing defaults path=%s bytes=%u\n",
+        Serial.printf("SD: config updated with defaults path=%s bytes=%u\n",
                       CONFIG_PATH,
                       (unsigned)written);
         return true;
@@ -537,9 +596,11 @@ bool sdcard_load_config(BaseConfig &config)
         return false;
     }
 
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, f);
+    String text = f.readString();
     f.close();
+    JsonDocument doc;
+    bool parse_repaired = false;
+    DeserializationError err = parse_config_text(doc, text, parse_repaired);
 
     if (err)
     {
@@ -584,6 +645,8 @@ bool sdcard_load_config(BaseConfig &config)
         stepper["steps_per_revolution"] | config.stepper.steps_per_revolution;
     config.stepper.reverse_wait_ms =
         stepper["reverse_wait_ms"] | config.stepper.reverse_wait_ms;
+    config.stepper.post_test_enabled =
+        stepper["post_test_enabled"] | config.stepper.post_test_enabled;
     const char *start_direction = stepper["start_direction"] | config.stepper.start_direction;
     strlcpy(config.stepper.start_direction,
             is_anti_clockwise_direction(start_direction) && !is_clockwise_direction(start_direction) ? "anti-clockwise" : "clockwise",
@@ -632,6 +695,8 @@ bool sdcard_load_config(BaseConfig &config)
     config.modem.apn_test_all = modem["apn_test_all"] | config.modem.apn_test_all;
     config.modem.validate_http_egress = modem["validate_http_egress"] | config.modem.validate_http_egress;
     config.modem.operator_auto_select = modem["operator_auto_select"] | config.modem.operator_auto_select;
+    config.modem.keep_alive_after_post = modem["keep_alive_after_post"] | config.modem.keep_alive_after_post;
+    config.modem.wake_for_runtime_sms = modem["wake_for_runtime_sms"] | config.modem.wake_for_runtime_sms;
     const char *lookup_primary = modem["lookup_primary"] | config.modem.lookup_primary;
     const char *lookup_secondary = modem["lookup_secondary"] | config.modem.lookup_secondary;
     String modem_apn = apn;
@@ -779,6 +844,22 @@ bool sdcard_load_config(BaseConfig &config)
     JsonObject sms = doc["sms"];
     config.sms.enabled = sms["enabled"] | config.sms.enabled;
     config.sms.post_test_enabled = sms["post_test_enabled"] | config.sms.post_test_enabled;
+    config.sms.runtime_settle_ms = sms["runtime_settle_ms"] | config.sms.runtime_settle_ms;
+    if (config.sms.runtime_settle_ms > 10000)
+        config.sms.runtime_settle_ms = 10000;
+    config.sms.runtime_delay_after_detection_seconds =
+        sms["runtime_delay_after_detection_seconds"] | config.sms.runtime_delay_after_detection_seconds;
+    if (config.sms.runtime_delay_after_detection_seconds > 3600)
+        config.sms.runtime_delay_after_detection_seconds = 3600;
+    config.sms.runtime_submit_timeout_ms =
+        sms["runtime_submit_timeout_ms"] | config.sms.runtime_submit_timeout_ms;
+    if (config.sms.runtime_submit_timeout_ms < 30000)
+        config.sms.runtime_submit_timeout_ms = 30000;
+    if (config.sms.runtime_submit_timeout_ms > 120000)
+        config.sms.runtime_submit_timeout_ms = 120000;
+    config.sms.cooldown_minutes = sms["cooldown_minutes"] | config.sms.cooldown_minutes;
+    if (config.sms.cooldown_minutes > 10080)
+        config.sms.cooldown_minutes = 10080;
     config.sms.failure_cooldown_seconds =
         sms["failure_cooldown_seconds"] | config.sms.failure_cooldown_seconds;
     if (config.sms.failure_cooldown_seconds > 86400)
@@ -810,7 +891,7 @@ bool sdcard_load_config(BaseConfig &config)
         }
     }
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_max_uploads_per_boot=%u sms_enabled=%s sms_post_test=%s sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_max_uploads_per_boot=%u sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -824,6 +905,7 @@ bool sdcard_load_config(BaseConfig &config)
                   config.stepper.steps_per_revolution,
                   config.stepper.reverse_wait_ms,
                   config.stepper.start_direction,
+                  config.stepper.post_test_enabled ? "YES" : "NO",
                   config.inference.confidence_threshold,
                   config.inference.detected_class,
                   config.inference.occurrence,
@@ -839,6 +921,10 @@ bool sdcard_load_config(BaseConfig &config)
                   config.azure.max_uploads_per_boot,
                   config.sms.enabled ? "YES" : "NO",
                   config.sms.post_test_enabled ? "YES" : "NO",
+                  config.sms.runtime_settle_ms,
+                  config.sms.runtime_delay_after_detection_seconds,
+                  (unsigned long)config.sms.runtime_submit_timeout_ms,
+                  (unsigned long)config.sms.cooldown_minutes,
                   config.sms.recipient_count,
                   (unsigned long)config.sms.failure_cooldown_seconds,
                   config.time.network_timeout_seconds,
