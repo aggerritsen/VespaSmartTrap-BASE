@@ -17,9 +17,26 @@ struct UartConfig {
 };
 
 struct InferenceConfig {
+    static constexpr uint8_t MAX_CLASS_NAMES = 8;
+
+    struct ClassName {
+        uint8_t class_idx;
+        char short_name[9];
+        char display_name[33];
+    };
+
     float confidence_threshold = 0.89f;
+    float doubtful_confidence_threshold = 0.70f;
     int16_t detected_class = 3;
     uint16_t occurrence = 3;
+    bool upload_doubtful_to_azure = true;
+    uint8_t class_name_count = 4;
+    ClassName class_names[MAX_CLASS_NAMES] = {
+        {0, "amel", "Apis mellifera"},
+        {1, "vcra", "Vespa crabro"},
+        {2, "vesp", "Vespula sp."},
+        {3, "vvel", "Vespa velutina"},
+    };
 };
 
 struct WebConfig {
@@ -95,7 +112,9 @@ struct HealthConfig {
 };
 
 struct AzureConfig {
-    uint8_t max_uploads_per_boot = 3;
+    uint32_t cooldown_minutes = 15;
+    uint32_t failure_cooldown_seconds = 120;
+    uint16_t runtime_connect_timeout_seconds = 20;
 };
 
 struct SmsConfig {
@@ -137,7 +156,13 @@ bool sdcard_init();
 bool sdcard_available();
 bool sdcard_ensure_config();
 bool sdcard_load_config(BaseConfig &config);
-bool sdcard_save_jpeg(uint32_t frame_id, const uint8_t *data, size_t len, char *out_path = nullptr, size_t out_path_len = 0);
+bool sdcard_save_jpeg(uint32_t frame_id,
+                      const uint8_t *data,
+                      size_t len,
+                      char *out_path = nullptr,
+                      size_t out_path_len = 0,
+                      int16_t class_idx = -1,
+                      float confidence = -1.0f);
 bool sdcard_begin_jpeg(uint32_t frame_id);
 bool sdcard_write_jpeg_chunk(const uint8_t *data, size_t len);
 bool sdcard_finish_jpeg();

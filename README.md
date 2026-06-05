@@ -13,14 +13,16 @@ The current base firmware provides the following operational features:
 - Power-on self test (POST) covering CPU, flash, heap, PSRAM, reset reason, SD card, configuration, modem, GNSS command path, UART, power telemetry, and actuator readiness.
 - SD-MMC storage for configuration, boot reports, frame logs, power logs, and selected JPEG captures.
 - SIM7080 modem initialization using TinyGSM, including AT readiness checks and network-time acquisition.
-- Azure Blob upload of saved detection images through a boot-time deferred queue.
+- Runtime Azure Blob upload of saved positive and configured doubtful detections, with independent cooldown and failure cooldown.
+- Runtime SMS notification after positive detections, with provider-aware direct-SMS gating, recipient list, and cooldown.
 - GNSS probing through the SIM7080 command interface, with optional GNSS UTC fallback when network time is unavailable and a trusted position is present.
 - Binary UART receiver for the Grove Vision AI V2 module using `VSTS` state frames and `VSTJ` JPEG frames with metadata and CRC32 validation.
-- Inference filtering by class, confidence threshold, and consecutive occurrence count before actuation and image persistence.
-- TB6612FNG stepper output for a configurable actuator cycle, including a boot-time POST cycle and a detection-triggered cycle.
+- Inference filtering by class, positive confidence threshold, doubtful confidence threshold, and consecutive occurrence count before actuation.
+- TB6612FNG stepper output for a configurable actuator cycle, including an optional boot-time POST cycle and a detection-triggered cycle.
 - WiFi web view in access-point or station mode, serving the latest verified frame and inference metadata over HTTP.
-- JSON Lines frame logging with timestamp, GNSS data, inference result, bounding box, CRC status, actuator result, saved filename, and firmware identity.
+- JSON Lines frame logging with timestamp, GNSS data, inference result, bounding box, CRC status, actuator result, SMS/Azure result, saved filename, and firmware identity.
 - Power telemetry logging to `/power.log` at a configurable interval.
+- GV2 power control on the custom PCB: power down before deep sleep, power up after wake, and a short reset cycle before UART receive starts.
 - Helper scripts for building and flashing the Grove Vision AI V2 firmware image and model.
 - [VSTtool](https://vsttool.org) support for flashing firmware to the MCUs used in the project.
 - Desktop image-viewer tooling and sample images for visual validation work.
@@ -60,6 +62,7 @@ The T-SIM7080G-S3 is the base controller. The Grove Vision AI V2 is treated as a
 | Upload | COM5 default, 921600 baud upload |
 | GV2 UART | Serial2, GPIO 16 RX, GPIO 17 TX, 921600 baud default |
 | GV2 protocol | `VSTS` state frames, `VSTJ` JPEG frames, CRC32 over JPEG payload |
+| GV2 power control | GPIO 43 on the custom PCB, OFF during deep sleep and reset-cycled before UART start |
 | Modem UART | Serial1, GPIO 4 RX, GPIO 5 TX |
 | Modem power key | GPIO 41 |
 | PMU | AXP2101 over I2C, SDA GPIO 15, SCL GPIO 7 |
@@ -72,7 +75,7 @@ The T-SIM7080G-S3 is the base controller. The Grove Vision AI V2 is treated as a
 | Current model path | `external/gv2-firmware/model_zoo/tflm_yolo11_od/` |
 | Current model file | `yolo11n_vespa_2026-02v1_allpxNULL_full_integer_quant_vela.tflite` |
 | Model flash offset | `0xB7B000` |
-| Model classes | `Apis mellifera`, `Vespa crabro`, `Vespa velutina` |
+| Model class short names | Configurable, defaults: `amel`, `vcra`, `vesp`, `vvel` |
 
 ## Repository Layout
 
@@ -101,13 +104,15 @@ At startup the receiver:
 1. Starts USB serial and prints system information.
 2. Initializes the SD card, creates `/config.json` when missing, and loads runtime configuration.
 3. Enables modem rails and probes SIM7080 AT readiness.
-4. Attempts to obtain network time and set system time.
-5. Powers and probes GNSS, optionally using trusted GNSS UTC as a fallback time source.
-6. Starts the WiFi web service when enabled.
-7. Initializes power telemetry, GV2 UART, and the stepper actuator.
-8. Writes `/post.log` to SD when available.
-9. Prints the POST summary to serial and runs the configured actuator POST cycle.
-10. Enters receive mode and prints a heartbeat every 5 seconds.
+4. Validates LTE-M/APN when modem mode is `2`, using SIM identity profiles first and candidate probing as fallback.
+5. Attempts to obtain network time and set system time.
+6. Optionally sends a POST SMS probe when `sms.post_test_enabled` is true.
+7. Powers and probes GNSS, optionally using trusted GNSS UTC as a fallback time source.
+8. Powers the modem down after POST unless `modem.keep_alive_after_post` is true.
+9. Starts the WiFi web service when enabled.
+10. Initializes power telemetry and the stepper actuator.
+11. Runs the optional stepper POST cycle when `stepper.post_test_enabled` is true.
+12. Reset-cycles GV2 power on GPIO 43, starts GV2 UART, writes `/post.log`, and enters receive mode.
 
 ## UART Protocol
 
@@ -135,10 +140,14 @@ The JPEG payload length is the trimmed JPEG length through the actual `FFD9` mar
 The receiver evaluates each valid JPEG frame against the configured inference filter:
 
 - `confidence_threshold`: required confidence as `0.0` to `1.0`.
+- `doubtful_confidence_threshold`: lower confidence band used for evidence-only Azure upload.
 - `detected_class`: target class index, or `-1` to accept any class.
 - `occurrence`: number of consecutive matching frames required.
+- `upload_doubtful_to_azure`: when true, saves and runtime-uploads matching-class frames between the doubtful and positive thresholds.
 
-When the occurrence threshold is reached, the firmware runs the configured stepper actuator cycle, flushes and resynchronizes the UART receive path after the blocking actuator movement, and then saves the triggering JPEG when the SD card is available. The occurrence counter resets after a completed actuator event.
+When the positive threshold and occurrence count are reached, the firmware runs the configured stepper actuator cycle, flushes and resynchronizes the UART receive path after the blocking actuator movement, saves the triggering JPEG when the SD card is available, optionally sends SMS, and attempts runtime Azure upload. The occurrence counter resets after the actuator event.
+
+Doubtful frames do not trigger the stepper and do not send SMS. When enabled, they are saved and sent through the same runtime Azure upload path.
 
 ## SD Card Files
 
@@ -149,12 +158,13 @@ The firmware creates or writes these files on the SD card:
 /post.log                     Boot POST summary, overwritten each boot
 /frames.log                   JSON Lines frame and detection log
 /power.log                    JSON Lines power telemetry log
-/azure_queue.log              Deferred Azure upload queue, cleared after POST drain
-/YYYYMMDD_HHMMSS_000123.jpg   Saved detection JPEGs when time is known
-/uptime_0000000000_000123.jpg Fallback JPEG naming when time is unavailable
+/vvel_0.859_YYYYMMDD_HHMMSS_000123.jpg Saved JPEGs with class short name and confidence
+/vvel_0.859_uptime_0000000000_000123.jpg Fallback JPEG naming when time is unavailable
 ```
 
-`/frames.log` includes device identity, firmware version, GNSS fields, inference state, bounding box, filter result, CRC result, actuator result, and saved filename.
+`/frames.log` includes device identity, firmware version, GNSS fields, inference state, bounding box, positive/doubtful filter result, CRC result, actuator result, SMS result, Azure result, cooldown status, and saved filename.
+
+The firmware removes legacy Azure queue files (`/azure_queue.log`, `/azure_queue.work`, `/azure_queue.tmp`) on SD mount. New firmware does not use an upload queue.
 
 ## Configuration
 
@@ -163,33 +173,112 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
 ```json
 {
   "schema_version": 1,
-  "device_name": "vst-base-001",
+  "device_name": "VST-BASE",
   "uart": {
+    "rx_gpio": 16,
+    "tx_gpio": 17,
     "baud": 921600
   },
+  "logging": {
+    "post_log": "/post.log",
+    "image_prefix": "/frame_"
+  },
+  "features": {
+    "gnss_probe": true,
+    "ack_frames": true
+  },
   "time": {
-    "network_timeout_seconds": 10,
+    "network_timeout_seconds": 60,
     "allow_gnss_fallback": true
+  },
+  "modem": {
+    "mode": 2,
+    "apn": "onomondo",
+    "apn_autodetect": true,
+    "apn_test_all": false,
+    "validate_http_egress": false,
+    "operator_auto_select": true,
+    "keep_alive_after_post": false,
+    "wake_for_runtime_sms": true,
+    "apn_candidates": [
+      { "supplier": "Onomondo", "apn": "onomondo" },
+      { "supplier": "KPNThings", "apn": "internet.m2m" },
+      { "supplier": "Wireless Logic Benelux", "apn": "" },
+      { "supplier": "ThingsData/Tele2 2G-4G", "apn": "m2m.tele2.com" },
+      { "supplier": "ThingsData/Tele2 5G", "apn": "iot.tele2.com" }
+    ],
+    "sim_profiles": [
+      {
+        "supplier": "Onomondo",
+        "apn": "onomondo",
+        "direct_sms": false,
+        "imsi_prefixes": ["23450", "23873"],
+        "iccid_prefixes": ["894573"]
+      },
+      {
+        "supplier": "KPNThings",
+        "apn": "internet.m2m",
+        "direct_sms": true,
+        "imsi_prefixes": ["20408"],
+        "iccid_prefixes": []
+      },
+      {
+        "supplier": "ThingsData/Tele2 2G-4G",
+        "apn": "m2m.tele2.com",
+        "direct_sms": true,
+        "imsi_prefixes": ["20402", "24007"],
+        "iccid_prefixes": ["894620"]
+      }
+    ],
+    "lookup_primary": "1.1.1.1",
+    "lookup_secondary": "8.8.8.8"
   },
   "stepper": {
     "speed_steps_per_second": 400,
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
     "reverse_wait_ms": 1000,
-    "start_direction": "ccw"
+    "start_direction": "ccw",
+    "post_test_enabled": false
   },
   "inference": {
-    "confidence_threshold": 0.89,
+    "confidence_threshold": 0.80,
+    "doubtful_confidence_threshold": 0.70,
+    "upload_doubtful_to_azure": true,
     "detected_class": 3,
-    "occurrence": 3
+    "occurrence": 3,
+    "class_names": [
+      { "class": 0, "short": "amel", "name": "Apis mellifera" },
+      { "class": 1, "short": "vcra", "name": "Vespa crabro" },
+      { "class": 2, "short": "vesp", "name": "Vespula sp." },
+      { "class": 3, "short": "vvel", "name": "Vespa velutina" }
+    ]
   },
   "power": {
-    "log_interval_seconds": 60,
-    "reboot_cron": "0 12 * * *",
+    "log_interval_seconds": 900,
+    "deep_sleep": 2,
+    "deep_sleep_start_hour": 18,
+    "deep_sleep_end_hour": 6,
+    "reboot_cron": "",
     "reboot_after_deep_sleep_wakeup": false
   },
+  "health": {
+    "led": 1
+  },
   "azure": {
-    "max_uploads_per_boot": 3
+    "cooldown_minutes": 15,
+    "failure_cooldown_seconds": 120,
+    "runtime_connect_timeout_seconds": 20
+  },
+  "sms": {
+    "enabled": false,
+    "post_test_enabled": false,
+    "runtime_settle_ms": 2000,
+    "runtime_delay_after_detection_seconds": 0,
+    "runtime_submit_timeout_ms": 60000,
+    "cooldown_minutes": 15,
+    "failure_cooldown_seconds": 900,
+    "recipients": []
   },
   "web": {
     "mode": 2,
@@ -200,9 +289,13 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
 }
 ```
 
-`web.mode` values are `0` for disabled, `1` for WiFi station mode, and `2` for access-point mode. `stepper.start_direction` accepts common clockwise and counter-clockwise forms such as `cw`, `clockwise`, `ccw`, and `anti-clockwise`.
+`device_name` is suffixed at runtime with the WiFi MAC suffix, matching the web SSID style, for example `VST-BASE-A62E94`. `web.mode` values are `0` for disabled, `1` for WiFi station mode, and `2` for access-point mode. `stepper.start_direction` accepts common clockwise and counter-clockwise forms such as `cw`, `clockwise`, `ccw`, and `anti-clockwise`.
 
-Azure upload is deferred. A saved detection image is queued on the SD card, then uploaded during the next POST window before the GV2 UART starts streaming. `azure.max_uploads_per_boot` is the single upload control: `0` disables queueing/uploading, while `1` to `20` queues saved detections and uploads at most that many queued files per boot. After a POST drain pass, `/azure_queue.log` is cleared completely.
+Azure upload is runtime-only. A saved positive or configured doubtful image is uploaded immediately when the Azure cooldown allows. If cooldown is active the image remains saved on SD but is not queued. If upload fails, the failure cooldown is applied and the image is not queued.
+
+SMS is runtime-only unless `sms.post_test_enabled` is explicitly true. `sms.enabled` is authoritative: recipients may be present while SMS remains disabled. SMS is skipped for providers whose selected SIM profile has `direct_sms=false`, such as Onomondo in the default profile set.
+
+The modem APN is selected from SIM identity first (`sim_profiles` by IMSI/ICCID prefixes), then by configured APN candidate probing. Known default profiles cover Onomondo, KPNThings, and ThingsData/Tele2 2G-4G.
 
 `power.reboot_cron` uses a five-field cron-like schedule after valid system time is available. For example, `0 12 * * *` reboots daily at noon. Leave it empty to disable scheduled reboot.
 

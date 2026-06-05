@@ -3,9 +3,6 @@
 #include <sys/time.h>
 #include <time.h>
 
-#include <FS.h>
-#include <SD_MMC.h>
-
 #include "esp_sleep.h"
 #include "esp_system.h"
 
@@ -18,9 +15,6 @@
 #include "web.h"
 
 static char g_timestamp[32] = {0};
-static constexpr const char *AZURE_QUEUE_PATH = "/azure_queue.log";
-static constexpr const char *AZURE_QUEUE_WORK_PATH = "/azure_queue.work";
-static constexpr const char *AZURE_QUEUE_TMP_PATH = "/azure_queue.tmp";
 RTC_DATA_ATTR static uint32_t g_deep_sleep_reboot_marker = 0;
 static constexpr uint32_t DEEP_SLEEP_REBOOT_MARKER = 0x44535242UL; // DSRB
 
@@ -612,8 +606,14 @@ static String make_post_summary_text()
     s += "power_reboot_after_deep_sleep_wakeup=";
     s += g_config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO";
     s += "\n";
-    s += "azure_max_uploads_per_boot=";
-    s += g_config.azure.max_uploads_per_boot;
+    s += "azure_cooldown_minutes=";
+    s += g_config.azure.cooldown_minutes;
+    s += "\n";
+    s += "azure_failure_cooldown_seconds=";
+    s += g_config.azure.failure_cooldown_seconds;
+    s += "\n";
+    s += "azure_runtime_connect_timeout_seconds=";
+    s += g_config.azure.runtime_connect_timeout_seconds;
     s += "\n";
     s += "==================================================\n\n";
 
@@ -688,11 +688,15 @@ static void print_post_summary()
     Serial.printf("POST: reboot_schedule  [cron=%s after_deep_sleep=%s]\n",
                   g_config.power.reboot_cron[0] ? g_config.power.reboot_cron : "-",
                   g_config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO");
-    Serial.printf("POST: azure_uploads    [max_per_boot=%u]\n",
-                  g_config.azure.max_uploads_per_boot);
-    Serial.printf("POST: inference_filter  [class=%d confidence>=%.3f occurrence=%u]\n",
+    Serial.printf("POST: azure_uploads    [runtime_only=YES cooldown=%lu min failure_cooldown=%lu sec runtime_connect_timeout=%u sec]\n",
+                  (unsigned long)g_config.azure.cooldown_minutes,
+                  (unsigned long)g_config.azure.failure_cooldown_seconds,
+                  g_config.azure.runtime_connect_timeout_seconds);
+    Serial.printf("POST: inference_filter  [class=%d positive>=%.3f doubtful>=%.3f upload_doubtful_to_azure=%s occurrence=%u]\n",
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
+                  g_config.inference.doubtful_confidence_threshold,
+                  g_config.inference.upload_doubtful_to_azure ? "YES" : "NO",
                   g_config.inference.occurrence);
     print_post_line("modem_at", g_post.modem_ready);
     if (g_config.modem.mode == 2)
@@ -811,95 +815,6 @@ static bool set_system_time_from_timestamp(const char *ts)
     Serial.println(buf);
 
     return true;
-}
-
-static bool parse_azure_queue_line(const String &line, String &local_path, String &blob_name)
-{
-    int first = line.indexOf(',');
-    int second = first >= 0 ? line.indexOf(',', first + 1) : -1;
-    if (first < 0 || second < 0)
-        return false;
-
-    local_path = line.substring(first + 1, second);
-    blob_name = line.substring(second + 1);
-    local_path.trim();
-    blob_name.trim();
-    return local_path.length() > 0 && blob_name.length() > 0;
-}
-
-static uint8_t drain_azure_upload_queue()
-{
-    if (!SD_MMC.exists(AZURE_QUEUE_PATH))
-        return 0;
-
-    SD_MMC.remove(AZURE_QUEUE_WORK_PATH);
-    SD_MMC.remove(AZURE_QUEUE_TMP_PATH);
-    if (!SD_MMC.rename(AZURE_QUEUE_PATH, AZURE_QUEUE_WORK_PATH)) {
-        Serial.printf("AZURE QUEUE: rename failed %s -> %s\n", AZURE_QUEUE_PATH, AZURE_QUEUE_WORK_PATH);
-        return 0;
-    }
-
-    File work = SD_MMC.open(AZURE_QUEUE_WORK_PATH, "r");
-    if (!work) {
-        Serial.printf("AZURE QUEUE: open failed path=%s\n", AZURE_QUEUE_WORK_PATH);
-        SD_MMC.rename(AZURE_QUEUE_WORK_PATH, AZURE_QUEUE_PATH);
-        return 0;
-    }
-
-    uint8_t uploaded = 0;
-    uint16_t discarded = 0;
-    uint16_t malformed = 0;
-    uint8_t max_uploads = g_config.azure.max_uploads_per_boot;
-    Serial.printf("AZURE QUEUE: drain begin max=%u clear_after=YES\n", (unsigned)max_uploads);
-
-    while (work.available()) {
-        String line = work.readStringUntil('\n');
-        line.trim();
-        if (!line.length())
-            continue;
-
-        if (uploaded >= max_uploads) {
-            discarded++;
-            continue;
-        }
-
-        String local_path;
-        String blob_name;
-        if (!parse_azure_queue_line(line, local_path, blob_name)) {
-            malformed++;
-            Serial.printf("AZURE QUEUE: malformed line skipped len=%u\n", (unsigned)line.length());
-            continue;
-        }
-
-        Serial.printf("AZURE QUEUE: upload begin local=%s blob=%s\n",
-                      local_path.c_str(),
-                      blob_name.c_str());
-        bool ok = modem_upload_azure_blob_from_sd(local_path.c_str(),
-                                                  blob_name.c_str(),
-                                                  g_config.modem.apn,
-                                                  10000);
-        Serial.printf("AZURE QUEUE: upload %s local=%s blob=%s\n",
-                      ok ? "PASS" : "FAIL",
-                      local_path.c_str(),
-                      blob_name.c_str());
-        if (ok) {
-            uploaded++;
-        } else {
-            discarded++;
-        }
-    }
-
-    work.close();
-    SD_MMC.remove(AZURE_QUEUE_WORK_PATH);
-    SD_MMC.remove(AZURE_QUEUE_TMP_PATH);
-    SD_MMC.remove(AZURE_QUEUE_PATH);
-    Serial.printf("AZURE QUEUE: upload log cleared path=%s\n", AZURE_QUEUE_PATH);
-
-    Serial.printf("AZURE QUEUE: drain done uploaded=%u discarded=%u malformed=%u\n",
-                  (unsigned)uploaded,
-                  (unsigned)discarded,
-                  (unsigned)malformed);
-    return uploaded;
 }
 
 static bool cron_field_is_wildcard(const char *field)
@@ -1614,12 +1529,6 @@ void setup()
         if (g_config.modem.mode != 0)
             send_post_sms_probe();
 
-        if (g_config.modem.mode == 2 && g_post.modem_ltem) {
-            uint8_t uploaded = drain_azure_upload_queue();
-            if (uploaded > 0)
-                Serial.printf("POST: azure_queue uploaded=%u\n", (unsigned)uploaded);
-        }
-
         bool should_probe_gnss = g_config.features.gnss_probe &&
                                  (g_config.modem.mode == 2 ||
                                   (!g_post.system_time && g_config.time.allow_gnss_fallback));
@@ -1674,7 +1583,7 @@ void setup()
         Serial.println("STEPPER: POST test cycle skipped by config");
     }
 
-    gv2_power_on();
+    gv2_power_reset_cycle(1000, 0);
     g_post.gv2_uart = gv2_uart_init(g_config.uart);
     gv2_uart_set_log_context(&g_config, &g_gnss);
     print_post_line("gv2_uart", g_post.gv2_uart);

@@ -31,6 +31,7 @@ bool gv2_uart_init(const UartConfig &config);
 bool gv2_uart_recover(const UartConfig &config);
 void gv2_uart_set_log_context(const BaseConfig *config, const ModemGnssInfo *gnss);
 void gv2_power_on();
+void gv2_power_reset_cycle(uint32_t off_ms = 1000, uint32_t settle_ms = 10000);
 void gv2_prepare_for_sleep(const UartConfig &config);
 void gv2_uart_poll();
 const Gv2UartStats &gv2_uart_stats();

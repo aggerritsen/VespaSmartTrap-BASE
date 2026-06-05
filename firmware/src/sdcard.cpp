@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <SD_MMC.h>
 #include <esp_log.h>
+#include <esp_mac.h>
 #include <strings.h>
 #include <time.h>
 
@@ -19,12 +20,44 @@ static bool sd_ok = false;
 static File active_jpeg_file;
 static char active_jpeg_path[64] = {0};
 static char configured_image_prefix[33] = "/frame_";
+static InferenceConfig::ClassName configured_class_names[InferenceConfig::MAX_CLASS_NAMES] = {
+    {0, "amel", "Apis mellifera"},
+    {1, "vcra", "Vespa crabro"},
+    {2, "vesp", "Vespula sp."},
+    {3, "vvel", "Vespa velutina"},
+};
+static uint8_t configured_class_name_count = 4;
 static uint32_t active_jpeg_bytes = 0;
 static uint32_t last_mount_attempt_ms = 0;
 static uint32_t last_sd_failure_log_ms = 0;
 static constexpr uint32_t SD_REMOUNT_BACKOFF_MS = 5000;
 
 static const char *CONFIG_PATH = "/config.json";
+static constexpr const char *LEGACY_AZURE_QUEUE_PATH = "/azure_queue.log";
+static constexpr const char *LEGACY_AZURE_QUEUE_WORK_PATH = "/azure_queue.work";
+static constexpr const char *LEGACY_AZURE_QUEUE_TMP_PATH = "/azure_queue.tmp";
+
+static void append_mac_suffix(char *value, size_t value_len)
+{
+    if (!value || value_len == 0)
+        return;
+
+    uint8_t mac[6] = {0};
+    if (esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP) != ESP_OK)
+        return;
+
+    char suffix[10];
+    snprintf(suffix, sizeof(suffix), "-%02X%02X%02X", mac[3], mac[4], mac[5]);
+    if (strstr(value, suffix))
+        return;
+
+    size_t used = strlen(value);
+    if (used + strlen(suffix) + 1 > value_len)
+        return;
+
+    strlcat(value, suffix, value_len);
+}
+
 static const char *sd_card_type_name(uint8_t type)
 {
     switch (type) {
@@ -122,6 +155,16 @@ static bool sdcard_try_mount(bool verbose)
         Serial.printf("SD: used_bytes=%llu total_bytes=%llu\n", used, size);
         Serial.printf("SD: free_bytes=%llu\n", size > used ? (size - used) : 0);
     }
+
+    bool removed_legacy_queue = false;
+    if (SD_MMC.exists(LEGACY_AZURE_QUEUE_PATH))
+        removed_legacy_queue |= SD_MMC.remove(LEGACY_AZURE_QUEUE_PATH);
+    if (SD_MMC.exists(LEGACY_AZURE_QUEUE_WORK_PATH))
+        removed_legacy_queue |= SD_MMC.remove(LEGACY_AZURE_QUEUE_WORK_PATH);
+    if (SD_MMC.exists(LEGACY_AZURE_QUEUE_TMP_PATH))
+        removed_legacy_queue |= SD_MMC.remove(LEGACY_AZURE_QUEUE_TMP_PATH);
+    if (removed_legacy_queue)
+        Serial.println("SD: removed legacy Azure queue files");
 
     sd_ok = true;
     return true;
@@ -257,6 +300,10 @@ static bool remove_legacy_config_fields(JsonDocument &doc)
     if (!modem.isNull())
         changed |= remove_key(modem, "apn_choices");
 
+    JsonObject azure = root["azure"];
+    if (!azure.isNull())
+        changed |= remove_key(azure, "max_uploads_per_boot");
+
     return changed;
 }
 
@@ -275,15 +322,8 @@ static bool ensure_config_defaults(JsonDocument &doc)
         return changed;
     }
 
-    JsonArray sms_recipients = doc["sms"]["recipients"];
-    bool sms_recipients_present = !sms_recipients.isNull() && sms_recipients.size() > 0;
-
     changed |= merge_missing_config(doc.as<JsonVariant>(), defaults.as<JsonVariantConst>());
     changed |= merge_sim_profile_prefix_defaults(doc, defaults);
-    if (sms_recipients_present && !doc["sms"]["enabled"].as<bool>()) {
-        doc["sms"]["enabled"] = true;
-        changed = true;
-    }
 
     return changed;
 }
@@ -336,27 +376,84 @@ static DeserializationError parse_config_text(JsonDocument &doc, const String &t
     return repaired_err;
 }
 
-static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id)
+static const char *class_short_name(int16_t class_idx)
 {
-    time_t now = time(nullptr);
-    struct tm tm{};
+    if (class_idx < 0)
+        return nullptr;
 
-    if (now > 1700000000 && localtime_r(&now, &tm)) {
-        snprintf(path,
-                 path_len,
-                 "%s%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
-                 configured_image_prefix,
-                 tm.tm_year + 1900,
-                 tm.tm_mon + 1,
-                 tm.tm_mday,
-                 tm.tm_hour,
-                 tm.tm_min,
-                 tm.tm_sec,
-                 (unsigned long)frame_id);
+    for (uint8_t i = 0; i < configured_class_name_count; i++) {
+        if (configured_class_names[i].class_idx == (uint8_t)class_idx &&
+            configured_class_names[i].short_name[0]) {
+            return configured_class_names[i].short_name;
+        }
+    }
+
+    return nullptr;
+}
+
+static void format_class_name(int16_t class_idx, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return;
+
+    const char *name = class_short_name(class_idx);
+    if (name && name[0]) {
+        strlcpy(out, name, out_len);
         return;
     }
 
-    snprintf(path, path_len, "%suptime_%010lu_%06lu.jpg", configured_image_prefix, millis(), (unsigned long)frame_id);
+    if (class_idx >= 0)
+        snprintf(out, out_len, "cls%03u", (unsigned)class_idx);
+    else
+        strlcpy(out, "clsunk", out_len);
+}
+
+static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id, int16_t class_idx = -1, float confidence = -1.0f)
+{
+    time_t now = time(nullptr);
+    struct tm tm{};
+    char class_name[12] = {0};
+    format_class_name(class_idx, class_name, sizeof(class_name));
+
+    int conf_milli = confidence >= 0.0f ? (int)(confidence * 1000.0f + 0.5f) : -1;
+    if (conf_milli > 999)
+        conf_milli = 999;
+
+    if (now > 1700000000 && localtime_r(&now, &tm)) {
+        if (confidence >= 0.0f) {
+            snprintf(path,
+                     path_len,
+                     "/%s_0.%03d_%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
+                     class_name,
+                     conf_milli,
+                     tm.tm_year + 1900,
+                     tm.tm_mon + 1,
+                     tm.tm_mday,
+                     tm.tm_hour,
+                     tm.tm_min,
+                     tm.tm_sec,
+                     (unsigned long)frame_id);
+        } else {
+            snprintf(path,
+                     path_len,
+                     "%s%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
+                     configured_image_prefix,
+                     tm.tm_year + 1900,
+                     tm.tm_mon + 1,
+                     tm.tm_mday,
+                     tm.tm_hour,
+                     tm.tm_min,
+                     tm.tm_sec,
+                     (unsigned long)frame_id);
+        }
+        return;
+    }
+
+    if (confidence >= 0.0f) {
+        snprintf(path, path_len, "/%s_0.%03d_uptime_%010lu_%06lu.jpg", class_name, conf_milli, millis(), (unsigned long)frame_id);
+    } else {
+        snprintf(path, path_len, "%suptime_%010lu_%06lu.jpg", configured_image_prefix, millis(), (unsigned long)frame_id);
+    }
 }
 
 static bool is_anti_clockwise_direction(const char *direction)
@@ -612,6 +709,9 @@ bool sdcard_load_config(BaseConfig &config)
 
     const char *device_name = doc["device_name"] | config.device_name;
     strlcpy(config.device_name, device_name, sizeof(config.device_name));
+    if (!config.device_name[0])
+        strlcpy(config.device_name, "VST-BASE", sizeof(config.device_name));
+    append_mac_suffix(config.device_name, sizeof(config.device_name));
 
     JsonObject logging = doc["logging"];
     const char *post_log = logging["post_log"] | config.logging.post_log;
@@ -662,21 +762,75 @@ bool sdcard_load_config(BaseConfig &config)
     JsonObject inference = doc["inference"];
     config.inference.confidence_threshold =
         inference["confidence_threshold"] | config.inference.confidence_threshold;
+    config.inference.doubtful_confidence_threshold =
+        inference["doubtful_confidence_threshold"] | config.inference.doubtful_confidence_threshold;
     config.inference.detected_class =
         inference["detected_class"] | config.inference.detected_class;
     config.inference.occurrence =
         inference["occurrence"] | (inference["occurence"] | config.inference.occurrence);
+    config.inference.upload_doubtful_to_azure =
+        inference["upload_doubtful_to_azure"] | config.inference.upload_doubtful_to_azure;
 
     if (config.inference.confidence_threshold < 0.0f)
         config.inference.confidence_threshold = 0.0f;
     if (config.inference.confidence_threshold > 1.0f)
         config.inference.confidence_threshold = 1.0f;
+    if (config.inference.doubtful_confidence_threshold < 0.0f)
+        config.inference.doubtful_confidence_threshold = 0.0f;
+    if (config.inference.doubtful_confidence_threshold > 1.0f)
+        config.inference.doubtful_confidence_threshold = 1.0f;
+    if (config.inference.doubtful_confidence_threshold > config.inference.confidence_threshold)
+        config.inference.doubtful_confidence_threshold = config.inference.confidence_threshold;
     if (config.inference.detected_class < -1)
         config.inference.detected_class = -1;
     if (config.inference.detected_class > 255)
         config.inference.detected_class = 255;
     if (config.inference.occurrence == 0)
         config.inference.occurrence = 1;
+    JsonArray class_names = inference["class_names"];
+    if (!class_names.isNull()) {
+        config.inference.class_name_count = 0;
+        for (JsonVariant class_name_value : class_names) {
+            if (config.inference.class_name_count >= InferenceConfig::MAX_CLASS_NAMES)
+                break;
+
+            JsonObject class_name_json = class_name_value.as<JsonObject>();
+            if (class_name_json.isNull())
+                continue;
+
+            int idx = class_name_json["class"] | -1;
+            if (idx < 0 || idx > 255)
+                continue;
+
+            const char *short_name = class_name_json["short"] | "";
+            String short_text = short_name ? short_name : "";
+            short_text.trim();
+            short_text.toLowerCase();
+            if (!short_text.length())
+                continue;
+
+            const char *display_name = class_name_json["name"] | "";
+            String display_text = display_name ? display_name : "";
+            display_text.trim();
+
+            InferenceConfig::ClassName &entry =
+                config.inference.class_names[config.inference.class_name_count++];
+            entry.class_idx = (uint8_t)idx;
+            strlcpy(entry.short_name, short_text.c_str(), sizeof(entry.short_name));
+            strlcpy(entry.display_name, display_text.c_str(), sizeof(entry.display_name));
+        }
+    }
+    if (config.inference.class_name_count == 0) {
+        InferenceConfig defaults;
+        config.inference.class_name_count = defaults.class_name_count;
+        for (uint8_t i = 0; i < defaults.class_name_count; i++) {
+            config.inference.class_names[i] = defaults.class_names[i];
+        }
+    }
+    configured_class_name_count = config.inference.class_name_count;
+    for (uint8_t i = 0; i < configured_class_name_count; i++) {
+        configured_class_names[i] = config.inference.class_names[i];
+    }
 
     JsonObject time = doc["time"];
     config.time.network_timeout_seconds =
@@ -836,10 +990,19 @@ bool sdcard_load_config(BaseConfig &config)
     config.health.led = config.health.led ? 1 : 0;
 
     JsonObject azure = doc["azure"];
-    config.azure.max_uploads_per_boot =
-        azure["max_uploads_per_boot"] | config.azure.max_uploads_per_boot;
-    if (config.azure.max_uploads_per_boot > 20)
-        config.azure.max_uploads_per_boot = 20;
+    config.azure.cooldown_minutes = azure["cooldown_minutes"] | config.azure.cooldown_minutes;
+    if (config.azure.cooldown_minutes > 10080)
+        config.azure.cooldown_minutes = 10080;
+    config.azure.failure_cooldown_seconds =
+        azure["failure_cooldown_seconds"] | config.azure.failure_cooldown_seconds;
+    if (config.azure.failure_cooldown_seconds > 86400)
+        config.azure.failure_cooldown_seconds = 86400;
+    config.azure.runtime_connect_timeout_seconds =
+        azure["runtime_connect_timeout_seconds"] | config.azure.runtime_connect_timeout_seconds;
+    if (config.azure.runtime_connect_timeout_seconds < 5)
+        config.azure.runtime_connect_timeout_seconds = 5;
+    if (config.azure.runtime_connect_timeout_seconds > 60)
+        config.azure.runtime_connect_timeout_seconds = 60;
 
     JsonObject sms = doc["sms"];
     config.sms.enabled = sms["enabled"] | config.sms.enabled;
@@ -891,7 +1054,7 @@ bool sdcard_load_config(BaseConfig &config)
         }
     }
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_max_uploads_per_boot=%u sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -907,6 +1070,8 @@ bool sdcard_load_config(BaseConfig &config)
                   config.stepper.start_direction,
                   config.stepper.post_test_enabled ? "YES" : "NO",
                   config.inference.confidence_threshold,
+                  config.inference.doubtful_confidence_threshold,
+                  config.inference.upload_doubtful_to_azure ? "YES" : "NO",
                   config.inference.detected_class,
                   config.inference.occurrence,
                   config.web.mode,
@@ -918,7 +1083,9 @@ bool sdcard_load_config(BaseConfig &config)
                   config.power.reboot_cron,
                   config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO",
                   config.health.led,
-                  config.azure.max_uploads_per_boot,
+                  (unsigned long)config.azure.cooldown_minutes,
+                  (unsigned long)config.azure.failure_cooldown_seconds,
+                  config.azure.runtime_connect_timeout_seconds,
                   config.sms.enabled ? "YES" : "NO",
                   config.sms.post_test_enabled ? "YES" : "NO",
                   config.sms.runtime_settle_ms,
@@ -1045,13 +1212,19 @@ bool sdcard_write_log(const char *path, const String &text)
 /* =============================
    SAVE JPEG
    ============================= */
-bool sdcard_save_jpeg(uint32_t frame_id, const uint8_t *data, size_t len, char *out_path, size_t out_path_len)
+bool sdcard_save_jpeg(uint32_t frame_id,
+                      const uint8_t *data,
+                      size_t len,
+                      char *out_path,
+                      size_t out_path_len,
+                      int16_t class_idx,
+                      float confidence)
 {
     if (!sdcard_ensure_ready())
         return false;
 
     char path[64];
-    make_jpeg_path(path, sizeof(path), frame_id);
+    make_jpeg_path(path, sizeof(path), frame_id, class_idx, confidence);
     if (out_path && out_path_len > 0) {
         strlcpy(out_path, path, out_path_len);
     }

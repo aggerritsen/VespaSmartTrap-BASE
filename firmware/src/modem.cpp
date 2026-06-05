@@ -775,6 +775,61 @@ static bool activate_app_pdp_context(const char *apn, char *out, size_t out_len,
     return false;
 }
 
+static uint32_t remaining_ms(uint32_t start_ms, uint32_t timeout_ms)
+{
+    uint32_t elapsed = millis() - start_ms;
+    return elapsed >= timeout_ms ? 0 : timeout_ms - elapsed;
+}
+
+static bool activate_app_pdp_context_bounded(const char *apn, uint32_t timeout_ms)
+{
+    if (!apn || !apn[0])
+        return false;
+
+    char ip[32] = {0};
+    uint32_t start = millis();
+    timeout_ms = timeout_ms < 5000 ? 5000 : timeout_ms;
+
+    deactivate_app_pdp_context();
+    uint32_t left = remaining_ms(start, timeout_ms);
+    if (left == 0)
+        return false;
+
+    if (!send_at_expect_ok("+CGATT=1", left)) {
+        Serial.println("MODEM: bounded APP PDP packet attach FAILED");
+        return false;
+    }
+
+    left = remaining_ms(start, timeout_ms);
+    if (left == 0)
+        return false;
+
+    Serial.printf("MODEM: bounded APP PDP configure id=0 pdp=IP apn=%s\n", apn);
+    modem.sendAT("+CNCFG=0,1,\"", apn, "\"");
+    int config_response = modem.waitResponse(left < 5000 ? left : 5000);
+    Serial.printf("MODEM: bounded APP PDP configure result=%s\n", config_response == 1 ? "OK" : "FAIL");
+    if (config_response != 1)
+        return false;
+
+    left = remaining_ms(start, timeout_ms);
+    if (left == 0)
+        return false;
+
+    Serial.printf("MODEM: bounded APP PDP activate id=0 action=1 timeout_ms=%lu\n", (unsigned long)left);
+    modem.sendAT("+CNACT=0,1");
+    int activate_response = modem.waitResponse(left, GF(AT_NL "+APP PDP: 0,ACTIVE"), GF(AT_NL "+APP PDP: 0,DEACTIVE"));
+    modem.waitResponse(500);
+    Serial.printf("MODEM: bounded APP PDP activate action=1 result=%s\n", activate_response == 1 ? "OK" : "FAIL");
+    if (activate_response != 1)
+        return false;
+
+    left = remaining_ms(start, timeout_ms);
+    if (left == 0)
+        return false;
+
+    return wait_for_app_pdp_address(ip, sizeof(ip), left);
+}
+
 static void print_at_raw_response(const char *label, const char *cmd, uint32_t timeout_ms)
 {
     Serial.printf("MODEM: %s query AT%s\n", label, cmd);
@@ -1247,10 +1302,11 @@ bool modem_test_http_egress(uint32_t timeout_ms)
     return true;
 }
 
-bool modem_upload_azure_blob_from_sd(const char *local_path,
-                                     const char *blob_name,
-                                     const char *apn,
-                                     uint32_t timeout_ms)
+static bool modem_upload_azure_blob_from_sd_impl(const char *local_path,
+                                                 const char *blob_name,
+                                                 const char *apn,
+                                                 uint32_t timeout_ms,
+                                                 uint32_t data_connect_timeout_ms)
 {
     if (!AZURE_BLOB_HOST[0] || !AZURE_BLOB_CONTAINER[0] || !AZURE_BLOB_SAS[0]) {
         Serial.println("AZURE: upload skipped; AZURE_BLOB_* secrets are not configured");
@@ -1289,13 +1345,22 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
             return false;
         }
 
-        Serial.printf("AZURE: no data active, gprsConnect apn=%s\n", apn);
-        if (!modem.gprsConnect(apn)) {
+        if (data_connect_timeout_ms > 0) {
+            Serial.printf("AZURE: no data active, bounded APP PDP connect apn=%s timeout_ms=%lu\n",
+                          apn,
+                          (unsigned long)data_connect_timeout_ms);
+        } else {
+            Serial.printf("AZURE: no data active, gprsConnect apn=%s\n", apn);
+        }
+        bool connected = data_connect_timeout_ms > 0
+            ? activate_app_pdp_context_bounded(apn, data_connect_timeout_ms)
+            : modem.gprsConnect(apn);
+        if (!connected) {
             file.close();
-            Serial.println("AZURE: upload FAILED reason=gprs_connect_failed");
+            Serial.println("AZURE: upload FAILED reason=data_connect_failed");
             return false;
         }
-        Serial.println("AZURE: data active after gprsConnect");
+        Serial.println("AZURE: data active after connect");
     } else {
         Serial.println("AZURE: data already active");
     }
@@ -1404,8 +1469,60 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
     else if (response.indexOf("ContainerNotFound") >= 0)
         Serial.println("AZURE: upload FAILED reason=container_not_found");
     else
-        Serial.println("AZURE: upload FAILED reason=http_status_or_unknown_response");
+    Serial.println("AZURE: upload FAILED reason=http_status_or_unknown_response");
     return false;
+}
+
+bool modem_upload_azure_blob_from_sd(const char *local_path,
+                                     const char *blob_name,
+                                     const char *apn,
+                                     uint32_t timeout_ms)
+{
+    return modem_upload_azure_blob_from_sd_impl(local_path, blob_name, apn, timeout_ms, 0);
+}
+
+bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
+                                             const char *blob_name,
+                                             const char *apn,
+                                             bool operator_auto_select,
+                                             bool wake_if_needed,
+                                             uint32_t timeout_ms,
+                                             bool power_down_after,
+                                             uint32_t data_connect_timeout_ms)
+{
+    bool woke_for_upload = false;
+    if (!g_serial_ready || !modem.testAT(1000)) {
+        if (!wake_if_needed) {
+            Serial.println("AZURE: runtime upload skipped reason=modem_off_wake_disabled");
+            return false;
+        }
+
+        Serial.println("AZURE: runtime upload wake begin");
+        if (!modem_init_early(operator_auto_select)) {
+            Serial.println("AZURE: runtime upload wake FAIL");
+            return false;
+        }
+        woke_for_upload = true;
+        Serial.println("AZURE: runtime upload wake OK");
+    }
+
+    Serial.println("AZURE: runtime upload registration check begin");
+    bool registered = wait_for_network_registration(15000);
+    Serial.printf("AZURE: runtime upload registration check result=%s\n", registered ? "OK" : "FAIL");
+    if (!registered) {
+        if (woke_for_upload || power_down_after)
+            modem_power_down_runtime("runtime_azure_registration_failed");
+        return false;
+    }
+
+    bool ok = modem_upload_azure_blob_from_sd_impl(local_path,
+                                                  blob_name,
+                                                  apn,
+                                                  timeout_ms,
+                                                  data_connect_timeout_ms);
+    if (woke_for_upload || power_down_after)
+        modem_power_down_runtime(ok ? "runtime_azure_done" : "runtime_azure_failed");
+    return ok;
 }
 
 static int wait_sms_final_response_raw(uint32_t timeout_ms)
@@ -1523,7 +1640,8 @@ bool modem_send_sms_text_runtime(const char *number,
                                  const char *apn,
                                  bool operator_auto_select,
                                  bool wake_if_needed,
-                                 uint32_t submit_timeout_ms)
+                                 uint32_t submit_timeout_ms,
+                                 bool power_down_after)
 {
     bool woke_for_sms = false;
     if (!g_serial_ready || !modem.testAT(1000)) {
@@ -1547,7 +1665,7 @@ bool modem_send_sms_text_runtime(const char *number,
 
     bool ok = modem_send_sms_text(number, message, submit_timeout_ms);
     (void)apn;
-    if (woke_for_sms)
+    if (woke_for_sms && power_down_after)
         modem_power_down_runtime(ok ? "runtime_sms_done" : "runtime_sms_failed");
     return ok;
 }

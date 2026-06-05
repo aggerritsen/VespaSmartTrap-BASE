@@ -40,6 +40,14 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
                                      const char *blob_name,
                                      const char *apn = nullptr,
                                      uint32_t timeout_ms = 20000);
+bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
+                                             const char *blob_name,
+                                             const char *apn,
+                                             bool operator_auto_select,
+                                             bool wake_if_needed,
+                                             uint32_t timeout_ms = 60000,
+                                             bool power_down_after = true,
+                                             uint32_t data_connect_timeout_ms = 20000);
 
 // Sends a text SMS through TinyGSM. The modem must already be initialized.
 bool modem_send_sms_text(const char *number, const char *message, uint32_t submit_timeout_ms = 30000);
@@ -48,7 +56,8 @@ bool modem_send_sms_text_runtime(const char *number,
                                  const char *apn,
                                  bool operator_auto_select,
                                  bool wake_if_needed,
-                                 uint32_t submit_timeout_ms = 60000);
+                                 uint32_t submit_timeout_ms = 60000,
+                                 bool power_down_after = true);
 
 struct ModemGnssInfo {
     bool command_ok = false;

@@ -3,9 +3,6 @@
 #include <string.h>
 #include <time.h>
 
-#include <FS.h>
-#include <SD_MMC.h>
-
 #include "esp_heap_caps.h"
 #include "version.h"
 #include "sdcard.h"
@@ -33,7 +30,6 @@ static constexpr size_t GV2_UART_RX_BUFFER_SIZE = 32UL * 1024UL;
 static constexpr size_t GV2_UART_READ_CHUNK_SIZE = 2048;
 static constexpr const char *FRAME_LOG_PATH = "/frames.log";
 static constexpr const char *HEALTH_LOG_PATH = "/health.log";
-static constexpr const char *AZURE_QUEUE_PATH = "/azure_queue.log";
 static constexpr uint32_t AZURE_UPLOAD_FAILURE_COOLDOWN_MS = 120000UL;
 
 static const uint8_t JPEG_MAGIC[4] = {'V', 'S', 'T', 'J'};
@@ -105,6 +101,16 @@ struct SmsNotifyResult {
     uint32_t cooldown_remaining_s;
 
     SmsNotifyResult(const char *status_value = "not_applicable", uint32_t remaining_s = 0)
+        : status(status_value),
+          cooldown_remaining_s(remaining_s)
+    {}
+};
+
+struct AzureUploadResult {
+    const char *status;
+    uint32_t cooldown_remaining_s;
+
+    AzureUploadResult(const char *status_value = "not_applicable", uint32_t remaining_s = 0)
         : status(status_value),
           cooldown_remaining_s(remaining_s)
     {}
@@ -368,6 +374,29 @@ void gv2_power_on()
     Serial.printf("GV2: power-control signal ON gpio=%d\n", GV2_POWER_GPIO_CFG);
 }
 
+void gv2_power_reset_cycle(uint32_t off_ms, uint32_t settle_ms)
+{
+    if (GV2_POWER_GPIO_CFG < 0)
+        return;
+
+    abort_active_jpeg();
+    reset_uart_sync_windows();
+    Gv2Serial.end();
+
+    pinMode(GV2_POWER_GPIO_CFG, OUTPUT);
+    digitalWrite(GV2_POWER_GPIO_CFG, LOW);
+    Serial.printf("GV2: power reset cycle OFF gpio=%d wait_ms=%lu\n",
+                  GV2_POWER_GPIO_CFG,
+                  (unsigned long)off_ms);
+    delay(off_ms);
+
+    digitalWrite(GV2_POWER_GPIO_CFG, HIGH);
+    Serial.printf("GV2: power reset cycle ON gpio=%d settle_ms=%lu\n",
+                  GV2_POWER_GPIO_CFG,
+                  (unsigned long)settle_ms);
+    delay(settle_ms);
+}
+
 static void gv2_pause_for_modem_upload()
 {
     abort_active_jpeg();
@@ -400,7 +429,7 @@ static void gv2_resume_after_modem_upload()
                   (unsigned long)discarded);
 }
 
-static void gv2_pause_uart_for_sms()
+static void gv2_pause_uart_for_modem_task(const char *reason)
 {
     reset_uart_sync_windows();
     uint32_t discarded = flush_gv2_uart_until_quiet(20, 150);
@@ -409,13 +438,14 @@ static void gv2_pause_uart_for_sms()
     pinMode(active_config.rx_gpio, INPUT);
     pinMode(active_config.tx_gpio, INPUT);
 
-    Serial.printf("GV2: UART paused for SMS discarded=%lu bytes rx=%u tx=%u\n",
+    Serial.printf("GV2: UART paused for %s discarded=%lu bytes rx=%u tx=%u\n",
+                  reason && reason[0] ? reason : "modem",
                   (unsigned long)discarded,
                   (unsigned)active_config.rx_gpio,
                   (unsigned)active_config.tx_gpio);
 }
 
-static void gv2_resume_uart_after_sms()
+static void gv2_resume_uart_after_modem_task(const char *reason)
 {
     size_t rx_buffer = Gv2Serial.setRxBufferSize(GV2_UART_RX_BUFFER_SIZE);
     Gv2Serial.begin(active_config.baud, SERIAL_8N1, active_config.rx_gpio, active_config.tx_gpio);
@@ -423,7 +453,8 @@ static void gv2_resume_uart_after_sms()
     delay(50);
     uint32_t discarded = flush_gv2_uart_until_quiet(20, 350);
     reset_uart_sync_windows();
-    Serial.printf("GV2: UART resumed after SMS RX=%d TX=%d baud=%lu rx_buffer=%u discarded=%lu\n",
+    Serial.printf("GV2: UART resumed after %s RX=%d TX=%d baud=%lu rx_buffer=%u discarded=%lu\n",
+                  reason && reason[0] ? reason : "modem",
                   active_config.rx_gpio,
                   active_config.tx_gpio,
                   (unsigned long)active_config.baud,
@@ -493,6 +524,27 @@ static bool frame_matches_class_and_confidence(bool valid)
     return valid && class_matches && confidence_matches;
 }
 
+static bool frame_matches_class(bool valid)
+{
+    const BaseConfig *cfg = log_config;
+    InferenceConfig inference = cfg ? cfg->inference : InferenceConfig{};
+    bool class_matches = inference.detected_class < 0 ||
+        jpeg_rx.frame_class_idx == (uint8_t)inference.detected_class;
+
+    return valid && class_matches;
+}
+
+static bool frame_matches_doubtful_confidence(bool valid)
+{
+    const BaseConfig *cfg = log_config;
+    InferenceConfig inference = cfg ? cfg->inference : InferenceConfig{};
+    float confidence = (float)jpeg_rx.frame_conf_u8 / 255.0f;
+
+    return frame_matches_class(valid) &&
+           confidence >= inference.doubtful_confidence_threshold &&
+           confidence < inference.confidence_threshold;
+}
+
 static uint16_t configured_occurrence()
 {
     const BaseConfig *cfg = log_config;
@@ -503,14 +555,27 @@ static uint16_t configured_occurrence()
 static bool azure_saved_image_upload_enabled()
 {
     const BaseConfig *cfg = log_config;
-    if (!cfg || cfg->azure.max_uploads_per_boot == 0 || cfg->modem.mode != 2)
-        return false;
-
-    uint32_t now = millis();
-    if (azure_upload_resume_ms != 0 && (int32_t)(now - azure_upload_resume_ms) < 0)
+    if (!cfg || cfg->modem.mode != 2)
         return false;
 
     return true;
+}
+
+static bool azure_runtime_upload_ready_now()
+{
+    if (!azure_saved_image_upload_enabled())
+        return false;
+
+    uint32_t now = millis();
+    return azure_upload_resume_ms == 0 || (int32_t)(now - azure_upload_resume_ms) >= 0;
+}
+
+static uint32_t azure_cooldown_remaining_s(uint32_t now)
+{
+    if (azure_upload_resume_ms == 0 || (int32_t)(now - azure_upload_resume_ms) >= 0)
+        return 0;
+
+    return (azure_upload_resume_ms - now + 999UL) / 1000UL;
 }
 
 static void make_blob_name_from_saved_path(const char *path, char *out, size_t out_len)
@@ -526,33 +591,61 @@ static void make_blob_name_from_saved_path(const char *path, char *out, size_t o
     snprintf(out, out_len, "saved_%s", name);
 }
 
-static bool queue_azure_saved_image_upload(const char *filename, const char *blob_name)
+static AzureUploadResult upload_runtime_azure_saved_image(const char *filename)
 {
-    if (!filename || !filename[0] || !blob_name || !blob_name[0])
-        return false;
+    const BaseConfig *cfg = log_config;
+    if (!filename || !filename[0])
+        return {"skipped_no_file"};
 
-    File f = SD_MMC.open(AZURE_QUEUE_PATH, FILE_APPEND);
-    if (!f) {
-        Serial.printf("GV2: Azure upload queue open failed path=%s\n", AZURE_QUEUE_PATH);
-        return false;
+    if (!azure_saved_image_upload_enabled()) {
+        Serial.println("GV2: Azure saved-image upload skipped");
+        return {"skipped"};
     }
 
-    String line;
-    line.reserve(strlen(filename) + strlen(blob_name) + 40);
-    line += current_timestamp();
-    line += ",";
-    line += filename;
-    line += ",";
-    line += blob_name;
-    line += "\n";
+    char blob_name[96] = {0};
+    make_blob_name_from_saved_path(filename, blob_name, sizeof(blob_name));
 
-    size_t written = f.print(line);
-    f.close();
-    Serial.printf("GV2: Azure saved-image upload queued file=%s blob=%s bytes=%u\n",
+    uint32_t now = millis();
+    uint32_t remaining_s = azure_cooldown_remaining_s(now);
+    if (remaining_s > 0) {
+        Serial.printf("GV2: Azure saved-image upload skipped reason=runtime_cooldown remaining_s=%lu file=%s blob=%s\n",
+                      (unsigned long)remaining_s,
+                      filename,
+                      blob_name);
+        return {"skipped_cooldown", remaining_s};
+    }
+
+    Serial.printf("GV2: Azure saved-image upload immediate begin file=%s blob=%s\n",
                   filename,
-                  blob_name,
-                  (unsigned)written);
-    return written == line.length();
+                  blob_name);
+
+    gv2_pause_uart_for_modem_task("Azure");
+    bool uploaded = modem_upload_azure_blob_from_sd_runtime(filename,
+                                                           blob_name,
+                                                           cfg ? cfg->modem.apn : nullptr,
+                                                           cfg ? cfg->modem.operator_auto_select : true,
+                                                           cfg ? cfg->modem.wake_for_runtime_sms : true,
+                                                           60000,
+                                                           true,
+                                                           cfg ? (uint32_t)cfg->azure.runtime_connect_timeout_seconds * 1000UL : 20000UL);
+    gv2_resume_uart_after_modem_task("Azure");
+
+    if (uploaded) {
+        uint32_t cooldown_ms = cfg ? cfg->azure.cooldown_minutes * 60000UL : 0;
+        azure_upload_resume_ms = cooldown_ms > 0 ? millis() + cooldown_ms : 0;
+        Serial.printf("GV2: Azure saved-image upload immediate PASS file=%s blob=%s\n",
+                      filename,
+                      blob_name);
+        return {"uploaded"};
+    }
+
+    uint32_t failure_cooldown_ms =
+        cfg ? cfg->azure.failure_cooldown_seconds * 1000UL : AZURE_UPLOAD_FAILURE_COOLDOWN_MS;
+    azure_upload_resume_ms = failure_cooldown_ms > 0 ? millis() + failure_cooldown_ms : 0;
+    Serial.printf("GV2: Azure saved-image upload immediate FAIL file=%s blob=%s\n",
+                  filename,
+                  blob_name);
+    return {"failed"};
 }
 
 static String sms_detection_message(const char *filename, size_t payload_len)
@@ -582,7 +675,7 @@ static String sms_detection_message(const char *filename, size_t payload_len)
     return s;
 }
 
-static SmsNotifyResult send_sms_message_now(const String &message, const char *source)
+static SmsNotifyResult send_sms_message_now(const String &message, const char *source, bool keep_modem_awake_after)
 {
     const BaseConfig *cfg = log_config;
     if (!cfg || !cfg->sms.enabled) {
@@ -624,7 +717,7 @@ static SmsNotifyResult send_sms_message_now(const String &message, const char *s
         Serial.printf("GV2: SMS notification cooldown begin minutes=%lu\n",
                       (unsigned long)cfg->sms.cooldown_minutes);
     }
-    gv2_pause_uart_for_sms();
+    gv2_pause_uart_for_modem_task("SMS");
     if (cfg->sms.runtime_settle_ms > 0) {
         Serial.printf("GV2: SMS runtime settle begin ms=%u\n", cfg->sms.runtime_settle_ms);
         delay(cfg->sms.runtime_settle_ms);
@@ -643,7 +736,8 @@ static SmsNotifyResult send_sms_message_now(const String &message, const char *s
                                               cfg->modem.apn,
                                               cfg->modem.operator_auto_select,
                                               cfg->modem.wake_for_runtime_sms,
-                                              cfg->sms.runtime_submit_timeout_ms);
+                                              cfg->sms.runtime_submit_timeout_ms,
+                                              !keep_modem_awake_after);
         Serial.printf("GV2: SMS notification %s recipient=%s number=%s\n",
                       ok ? "PASS" : "FAIL",
                       recipient.name[0] ? recipient.name : "-",
@@ -661,7 +755,7 @@ static SmsNotifyResult send_sms_message_now(const String &message, const char *s
 
         sms_failure_resume_ms = 0;
     }
-    gv2_resume_uart_after_sms();
+    gv2_resume_uart_after_modem_task("SMS");
     return {all_ok ? "sent" : "failed", 0};
 }
 
@@ -678,10 +772,10 @@ static void process_pending_sms_notification()
     sms_pending = false;
     sms_pending_message = "";
     Serial.println("GV2: SMS notification delayed attempt due");
-    send_sms_message_now(message, "delayed_detection");
+    send_sms_message_now(message, "delayed_detection", false);
 }
 
-static SmsNotifyResult send_detection_sms_notifications(const char *filename, size_t payload_len)
+static SmsNotifyResult send_detection_sms_notifications(const char *filename, size_t payload_len, bool keep_modem_awake_after)
 {
     const BaseConfig *cfg = log_config;
     String message = sms_detection_message(filename, payload_len);
@@ -705,7 +799,7 @@ static SmsNotifyResult send_detection_sms_notifications(const char *filename, si
         return {"scheduled", cfg->sms.runtime_delay_after_detection_seconds};
     }
 
-    return send_sms_message_now(message, "detection");
+    return send_sms_message_now(message, "detection", keep_modem_awake_after);
 }
 
 static const char *gv2_error_name(uint8_t code, uint8_t detail)
@@ -812,13 +906,15 @@ static bool read_heartbeat_payload()
 static void append_frame_log(bool saved,
                              bool valid,
                              bool filter_match,
+                             bool doubtful_match,
                              bool detection_match,
                              bool actuated,
                              bool crc_ok,
                              uint32_t crc_actual,
                              size_t payload_len,
                              const char *filename,
-                             const SmsNotifyResult &sms_result)
+                             const SmsNotifyResult &sms_result,
+                             const AzureUploadResult &azure_result)
 {
     const BaseConfig *cfg = log_config;
     const ModemGnssInfo *gnss = log_gnss;
@@ -860,6 +956,8 @@ static void append_frame_log(bool saved,
     s += String(confidence, 3);
     s += ",\"confidence_threshold\":";
     s += String(inference.confidence_threshold, 3);
+    s += ",\"doubtful_confidence_threshold\":";
+    s += String(inference.doubtful_confidence_threshold, 3);
     s += ",\"detected_class\":";
     s += inference.detected_class;
     s += ",\"occurrence_required\":";
@@ -868,6 +966,10 @@ static void append_frame_log(bool saved,
     s += (unsigned)jpeg_rx.detection_streak;
     s += ",\"filter_match\":";
     s += filter_match ? "true" : "false";
+    s += ",\"doubtful_match\":";
+    s += doubtful_match ? "true" : "false";
+    s += ",\"upload_doubtful_to_azure\":";
+    s += inference.upload_doubtful_to_azure ? "true" : "false";
     s += ",\"detection_match\":";
     s += detection_match ? "true" : "false";
     s += "},\"box\":{\"x\":";
@@ -914,6 +1016,10 @@ static void append_frame_log(bool saved,
     append_json_field(s, "status", sms_result.status ? sms_result.status : "not_applicable");
     s += ",\"cooldown_remaining_s\":";
     s += (unsigned long)sms_result.cooldown_remaining_s;
+    s += "},\"azure\":{";
+    append_json_field(s, "status", azure_result.status ? azure_result.status : "not_applicable");
+    s += ",\"cooldown_remaining_s\":";
+    s += (unsigned long)azure_result.cooldown_remaining_s;
     s += "}}\n";
 
     sdcard_append_log(FRAME_LOG_PATH, s);
@@ -1113,6 +1219,7 @@ void gv2_uart_poll()
                     (payload_len == jpeg_rx.frame_len && crc_actual == jpeg_rx.frame_crc32);
                 bool valid = jpeg_rx.frame_has_crc32 && crc_ok && jpeg_sanity_check(jpeg_rx.jpeg_buf, payload_len);
                 bool filter_match = frame_matches_class_and_confidence(valid);
+                bool doubtful_match = frame_matches_doubtful_confidence(valid);
                 if (filter_match) {
                     if (jpeg_rx.detection_streak < UINT16_MAX)
                         jpeg_rx.detection_streak++;
@@ -1122,10 +1229,15 @@ void gv2_uart_poll()
 
                 uint16_t occurrence = configured_occurrence();
                 bool detection_match = filter_match && jpeg_rx.detection_streak >= occurrence;
+                bool save_doubtful = !detection_match &&
+                                     doubtful_match &&
+                                     log_config &&
+                                     log_config->inference.upload_doubtful_to_azure;
                 bool actuated = false;
                 char filename[64] = {0};
                 bool saved = false;
                 SmsNotifyResult sms_result;
+                AzureUploadResult azure_result;
 
                 if (detection_match) {
                     actuated = stepper_run_configured_cycle();
@@ -1139,20 +1251,31 @@ void gv2_uart_poll()
                                              jpeg_rx.jpeg_buf,
                                              payload_len,
                                              filename,
-                                             sizeof(filename));
+                                             sizeof(filename),
+                                             jpeg_rx.frame_class_idx,
+                                             (float)jpeg_rx.frame_conf_u8 / 255.0f);
+                    bool azure_ready_after_sms = saved && azure_runtime_upload_ready_now();
                     if (saved) {
-                        sms_result = send_detection_sms_notifications(filename, payload_len);
+                        sms_result = send_detection_sms_notifications(filename, payload_len, azure_ready_after_sms);
                     }
-                    if (saved && azure_saved_image_upload_enabled()) {
-                        char blob_name[96] = {0};
-                        make_blob_name_from_saved_path(filename, blob_name, sizeof(blob_name));
-                        bool queued = queue_azure_saved_image_upload(filename, blob_name);
-                        Serial.printf("GV2: Azure saved-image upload deferred %s file=%s blob=%s\n",
-                                      queued ? "OK" : "FAIL",
+                    if (saved) {
+                        azure_result = upload_runtime_azure_saved_image(filename);
+                    }
+                } else if (save_doubtful) {
+                    saved = sdcard_save_jpeg(jpeg_rx.image_counter,
+                                             jpeg_rx.jpeg_buf,
+                                             payload_len,
+                                             filename,
+                                             sizeof(filename),
+                                             jpeg_rx.frame_class_idx,
+                                             (float)jpeg_rx.frame_conf_u8 / 255.0f);
+                    if (saved) {
+                        Serial.printf("GV2: doubtful image saved for Azure file=%s conf=%.3f threshold=%.3f positive_threshold=%.3f\n",
                                       filename,
-                                      blob_name);
-                    } else if (saved) {
-                        Serial.println("GV2: Azure saved-image upload skipped");
+                                      (float)jpeg_rx.frame_conf_u8 / 255.0f,
+                                      log_config->inference.doubtful_confidence_threshold,
+                                      log_config->inference.confidence_threshold);
+                        azure_result = upload_runtime_azure_saved_image(filename);
                     }
                 }
 
@@ -1164,13 +1287,15 @@ void gv2_uart_poll()
                 append_frame_log(saved,
                                  valid,
                                  filter_match,
+                                 doubtful_match,
                                  detection_match,
                                  actuated,
                                  crc_ok,
                                  crc_actual,
                                  payload_len,
                                  saved ? filename : "",
-                                 sms_result);
+                                 sms_result,
+                                 azure_result);
 
                 WebFrameInfo web_info;
                 web_info.frame_id = jpeg_rx.image_counter;
@@ -1197,7 +1322,7 @@ void gv2_uart_poll()
 
                 jpeg_rx.receiving_jpeg = false;
                 stats.jpeg_frames++;
-                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s occurrence=%u/%u detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
+                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s doubtful_match=%s occurrence=%u/%u detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu azure=%s azure_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
                               (unsigned long)jpeg_rx.image_counter,
                               (unsigned long)jpeg_rx.frame_len,
                               (unsigned)payload_len,
@@ -1215,6 +1340,7 @@ void gv2_uart_poll()
                               jpeg_rx.frame_bbox_h,
                               valid ? "YES" : "NO",
                               filter_match ? "YES" : "NO",
+                              doubtful_match ? "YES" : "NO",
                               jpeg_rx.detection_streak,
                               occurrence,
                               detection_match ? "YES" : "NO",
@@ -1223,6 +1349,8 @@ void gv2_uart_poll()
                               detection_match ? (actuated ? "activated" : "failed") : "skipped",
                               sms_result.status ? sms_result.status : "not_applicable",
                               (unsigned long)sms_result.cooldown_remaining_s,
+                              azure_result.status ? azure_result.status : "not_applicable",
+                              (unsigned long)azure_result.cooldown_remaining_s,
                               jpeg_rx.frame_len >= 2 ? jpeg_rx.jpeg_buf[0] : 0,
                               jpeg_rx.frame_len >= 2 ? jpeg_rx.jpeg_buf[1] : 0,
                               payload_len >= 2 ? jpeg_rx.jpeg_buf[payload_len - 2] : 0,
