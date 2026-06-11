@@ -236,6 +236,8 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6,
+    "low_battery_sleep_percent": 10,
+    "low_battery_wake_interval_minutes": 60,
     "reboot_cron": "0 12 * * *",
     "reboot_after_deep_sleep_wakeup": false
   },
@@ -259,6 +261,8 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 | `2` | Sleep during the configured local-time window only when running from battery |
 
 Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, stops the GV2 UART, drives the future GV2 power-control signal on GPIO 43 LOW, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup. On the current hardware GPIO 43 does not physically power-cycle GV2.
+
+Low-battery protection is independent of the night window. When a battery is present, no mains/VBUS input is detected, and `battery_percent` is less than or equal to `power.low_battery_sleep_percent`, the firmware enters deep sleep for `power.low_battery_wake_interval_minutes`. This check runs immediately after SD config and PMU init, before modem, web, stepper, or GV2 startup work, and it also runs during normal runtime. The default policy is to sleep at `10%` or lower and wake every `60` minutes to check whether solar charging has recovered the battery enough to continue.
 
 `power.reboot_cron` is a five-field cron-like schedule checked once per loop minute after valid system time is available. It supports `*`, single values, comma lists, ranges, and `*/step`. For example, `"0 12 * * *"` reboots daily at noon. Leave it empty to disable scheduled reboot. `power.reboot_after_deep_sleep_wakeup=true` performs one immediate restart after waking from a firmware-entered deep sleep, then clears the RTC marker to avoid a reboot loop.
 

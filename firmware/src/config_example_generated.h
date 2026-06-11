@@ -122,6 +122,8 @@ static constexpr const char *CONFIG_EXAMPLE_JSON =
     "    \"deep_sleep\": 2,\n"
     "    \"deep_sleep_start_hour\": 18,\n"
     "    \"deep_sleep_end_hour\": 6,\n"
+    "    \"low_battery_sleep_percent\": 10,\n"
+    "    \"low_battery_wake_interval_minutes\": 60,\n"
     "    \"reboot_cron\": \"\",\n"
     "    \"reboot_after_deep_sleep_wakeup\": false\n"
     "  },\n"

@@ -17,6 +17,10 @@ static XPowersPMU PMU;
 static PowerConfig g_power_config;
 static bool g_power_ready = false;
 static uint32_t g_last_log_ms = 0;
+static bool g_last_solar_sample_valid = false;
+static uint16_t g_last_battery_mv = 0;
+static int g_last_battery_percent = -1;
+static bool g_last_external_power_present = false;
 
 static const char *charger_status_name(uint8_t status)
 {
@@ -94,6 +98,12 @@ static String make_power_log_line(const PowerSnapshot &snapshot)
     s += snapshot.vbus_in ? "true" : "false";
     s += ",\"vbus_mv\":";
     s += (unsigned)snapshot.vbus_mv;
+    s += ",\"mains_power\":";
+    s += snapshot.mains_power_present ? "true" : "false";
+    s += ",\"solar_suspect\":";
+    s += snapshot.solar_suspect ? "true" : "false";
+    s += ",\"battery_rising_no_vbus\":";
+    s += snapshot.battery_rising_no_vbus ? "true" : "false";
     s += "},\"system\":{\"vsys_mv\":";
     s += (unsigned)snapshot.vsys_mv;
     s += ",\"pmu_temp_c\":";
@@ -168,6 +178,30 @@ bool power_read_snapshot(PowerSnapshot &snapshot)
     snapshot.vbus_mv = PMU.getVbusVoltage();
     snapshot.vsys_mv = PMU.getSystemVoltage();
     snapshot.pmu_temp_c = PMU.getTemperature();
+
+    snapshot.mains_power_present = snapshot.vbus_good ||
+                                   snapshot.vbus_in ||
+                                   snapshot.vbus_mv > 4200;
+    if (snapshot.battery_present &&
+        !snapshot.mains_power_present &&
+        g_last_solar_sample_valid &&
+        !g_last_external_power_present) {
+        bool mv_rising = snapshot.battery_mv > 0 &&
+                         g_last_battery_mv > 0 &&
+                         snapshot.battery_mv >= g_last_battery_mv + 5;
+        bool percent_rising = snapshot.battery_percent >= 0 &&
+                              g_last_battery_percent >= 0 &&
+                              snapshot.battery_percent > g_last_battery_percent;
+        snapshot.battery_rising_no_vbus = mv_rising || percent_rising;
+        snapshot.solar_suspect = snapshot.battery_rising_no_vbus;
+    }
+
+    if (snapshot.battery_present) {
+        g_last_solar_sample_valid = true;
+        g_last_battery_mv = snapshot.battery_mv;
+        g_last_battery_percent = snapshot.battery_percent;
+        g_last_external_power_present = snapshot.mains_power_present;
+    }
 
     return true;
 }

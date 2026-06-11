@@ -16,11 +16,14 @@ struct PowerSnapshot {
     bool standby = false;
     bool thermal_regulation = false;
     bool current_limit = false;
+    bool mains_power_present = false;
     uint8_t charger_status = 0;
     uint16_t battery_mv = 0;
     int battery_percent = -1;
     uint16_t vbus_mv = 0;
     uint16_t vsys_mv = 0;
+    bool battery_rising_no_vbus = false;
+    bool solar_suspect = false;
     float pmu_temp_c = NAN;
 };
 

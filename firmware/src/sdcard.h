@@ -61,6 +61,8 @@ struct PowerConfig {
     uint8_t deep_sleep = 2;
     uint8_t deep_sleep_start_hour = 18;
     uint8_t deep_sleep_end_hour = 6;
+    uint8_t low_battery_sleep_percent = 10;
+    uint16_t low_battery_wake_interval_minutes = 60;
     char reboot_cron[64] = "";
     bool reboot_after_deep_sleep_wakeup = false;
 };

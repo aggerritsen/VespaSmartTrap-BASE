@@ -968,6 +968,10 @@ bool sdcard_load_config(BaseConfig &config)
         power["deep_sleep_start_hour"] | config.power.deep_sleep_start_hour;
     config.power.deep_sleep_end_hour =
         power["deep_sleep_end_hour"] | config.power.deep_sleep_end_hour;
+    config.power.low_battery_sleep_percent =
+        power["low_battery_sleep_percent"] | config.power.low_battery_sleep_percent;
+    config.power.low_battery_wake_interval_minutes =
+        power["low_battery_wake_interval_minutes"] | config.power.low_battery_wake_interval_minutes;
     const char *reboot_cron = power["reboot_cron"] | config.power.reboot_cron;
     strlcpy(config.power.reboot_cron, reboot_cron, sizeof(config.power.reboot_cron));
     config.power.reboot_after_deep_sleep_wakeup =
@@ -984,6 +988,12 @@ bool sdcard_load_config(BaseConfig &config)
         config.power.deep_sleep_end_hour = 6;
     if (config.power.deep_sleep_start_hour == config.power.deep_sleep_end_hour)
         config.power.deep_sleep = 0;
+    if (config.power.low_battery_sleep_percent > 100)
+        config.power.low_battery_sleep_percent = 10;
+    if (config.power.low_battery_wake_interval_minutes < 5)
+        config.power.low_battery_wake_interval_minutes = 5;
+    if (config.power.low_battery_wake_interval_minutes > 1440)
+        config.power.low_battery_wake_interval_minutes = 1440;
 
     JsonObject health = doc["health"];
     config.health.led = health["led"] | config.health.led;
@@ -1054,7 +1064,7 @@ bool sdcard_load_config(BaseConfig &config)
         }
     }
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_low_battery_sleep_percent=%u power_low_battery_wake_interval_minutes=%u power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -1080,6 +1090,8 @@ bool sdcard_load_config(BaseConfig &config)
                   config.power.deep_sleep,
                   config.power.deep_sleep_start_hour,
                   config.power.deep_sleep_end_hour,
+                  config.power.low_battery_sleep_percent,
+                  config.power.low_battery_wake_interval_minutes,
                   config.power.reboot_cron,
                   config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO",
                   config.health.led,

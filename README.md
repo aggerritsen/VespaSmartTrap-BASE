@@ -259,6 +259,8 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6,
+    "low_battery_sleep_percent": 10,
+    "low_battery_wake_interval_minutes": 60,
     "reboot_cron": "",
     "reboot_after_deep_sleep_wakeup": false
   },
@@ -298,6 +300,8 @@ SMS is runtime-only unless `sms.post_test_enabled` is explicitly true. `sms.enab
 The modem APN is selected from SIM identity first (`sim_profiles` by IMSI/ICCID prefixes), then by configured APN candidate probing. Known default profiles cover Onomondo, KPNThings, and ThingsData/Tele2 2G-4G.
 
 `power.reboot_cron` uses a five-field cron-like schedule after valid system time is available. For example, `0 12 * * *` reboots daily at noon. Leave it empty to disable scheduled reboot.
+
+Low-battery protection is separate from the scheduled sleep window. With the default settings, a battery-powered unit sleeps when the PMU reports `10%` or lower and wakes every `60` minutes to re-check the battery. If solar has recovered the battery above the configured threshold, normal startup continues; otherwise it returns to deep sleep before modem, web, stepper, or GV2 runtime work starts.
 
 ## Build And Flash The Base Firmware
 

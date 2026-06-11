@@ -117,6 +117,8 @@
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6,
+    "low_battery_sleep_percent": 10,
+    "low_battery_wake_interval_minutes": 60,
     "reboot_cron": "",
     "reboot_after_deep_sleep_wakeup": false
   },

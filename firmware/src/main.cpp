@@ -263,36 +263,40 @@ static bool deep_sleep_power_condition_allows(const char *phase)
         return false;
     }
 
-    bool external_power_present = snapshot.vbus_good || snapshot.vbus_in || snapshot.vbus_mv > 4200;
-    bool battery_only_discharge = snapshot.battery_present && snapshot.discharging && !external_power_present;
+    bool battery_only_discharge = snapshot.battery_present && snapshot.discharging && !snapshot.mains_power_present;
 
     if (!battery_only_discharge) {
-        Serial.printf("POWER: sleep schedule skipped phase=%s reason=external_power_or_not_discharging mode=2 battery_present=%s discharging=%s vbus_good=%s vbus_in=%s vbus_mv=%u\n",
+        Serial.printf("POWER: sleep schedule skipped phase=%s reason=mains_power_or_not_discharging mode=2 battery_present=%s discharging=%s mains_power=%s vbus_good=%s vbus_in=%s vbus_mv=%u solar=%s\n",
                       phase,
                       snapshot.battery_present ? "YES" : "NO",
                       snapshot.discharging ? "YES" : "NO",
+                      snapshot.mains_power_present ? "YES" : "NO",
                       snapshot.vbus_good ? "YES" : "NO",
                       snapshot.vbus_in ? "YES" : "NO",
-                      (unsigned)snapshot.vbus_mv);
+                      (unsigned)snapshot.vbus_mv,
+                      snapshot.solar_suspect ? "SUSPECT" : "NO");
         return false;
     }
 
-    Serial.printf("POWER: sleep mode 2 allowed phase=%s battery_present=%s discharging=%s vbus_good=%s vbus_in=%s vbus_mv=%u\n",
+    Serial.printf("POWER: sleep mode 2 allowed phase=%s battery_present=%s discharging=%s mains_power=%s vbus_good=%s vbus_in=%s vbus_mv=%u solar=%s\n",
                   phase,
                   snapshot.battery_present ? "YES" : "NO",
                   snapshot.discharging ? "YES" : "NO",
+                  snapshot.mains_power_present ? "YES" : "NO",
                   snapshot.vbus_good ? "YES" : "NO",
                   snapshot.vbus_in ? "YES" : "NO",
-                  (unsigned)snapshot.vbus_mv);
+                  (unsigned)snapshot.vbus_mv,
+                  snapshot.solar_suspect ? "SUSPECT" : "NO");
     return true;
 }
 
-static void enter_deep_sleep_until(uint32_t sleep_seconds)
+static void enter_deep_sleep_until(uint32_t sleep_seconds, const char *reason = nullptr)
 {
     if (sleep_seconds < 60)
         sleep_seconds = 60;
 
-    const char *reason = deep_sleep_reason();
+    if (!reason || !reason[0])
+        reason = deep_sleep_reason();
     Serial.printf("POWER: entering deep sleep for %lu seconds reason=%s\n",
                   (unsigned long)sleep_seconds,
                   reason);
@@ -307,6 +311,69 @@ static void enter_deep_sleep_until(uint32_t sleep_seconds)
     Serial.flush();
     esp_sleep_enable_timer_wakeup((uint64_t)sleep_seconds * 1000000ULL);
     esp_deep_sleep_start();
+}
+
+static bool sleep_if_battery_too_low(const char *phase)
+{
+    uint8_t threshold = g_config.power.low_battery_sleep_percent;
+    if (threshold == 0)
+        return false;
+
+    static uint32_t last_loop_check_ms = 0;
+    if (phase && strcmp(phase, "loop") == 0) {
+        uint32_t now_ms = millis();
+        uint32_t interval_ms = g_config.power.log_interval_seconds * 1000UL;
+        if (interval_ms == 0 || interval_ms > 60000UL)
+            interval_ms = 60000UL;
+        if (last_loop_check_ms != 0 && now_ms - last_loop_check_ms < interval_ms)
+            return false;
+        last_loop_check_ms = now_ms;
+    }
+
+    PowerSnapshot snapshot;
+    if (!power_read_snapshot(snapshot)) {
+        Serial.printf("POWER: low-battery sleep skipped phase=%s reason=power_snapshot_unavailable\n", phase);
+        return false;
+    }
+
+    bool low_battery = snapshot.battery_present &&
+                       !snapshot.mains_power_present &&
+                       snapshot.battery_percent >= 0 &&
+                       snapshot.battery_percent <= threshold;
+    const char *action = low_battery ? "sleep" : "continue";
+    Serial.printf("POWER: low-battery check phase=%s battery_present=%s battery=%d%% battery_mv=%u threshold=%u%% mains_power=%s vbus_mv=%u solar=%s action=%s\n",
+                  phase,
+                  snapshot.battery_present ? "YES" : "NO",
+                  snapshot.battery_percent,
+                  (unsigned)snapshot.battery_mv,
+                  threshold,
+                  snapshot.mains_power_present ? "YES" : "NO",
+                  (unsigned)snapshot.vbus_mv,
+                  snapshot.solar_suspect ? "SUSPECT" : "NO",
+                  action);
+    if (!low_battery)
+        return false;
+
+    uint32_t sleep_seconds = (uint32_t)g_config.power.low_battery_wake_interval_minutes * 60UL;
+    Serial.printf("POWER: low-battery sleep phase=%s battery=%d%% threshold=%u%% wake_minutes=%u mains_power=%s vbus_mv=%u solar=%s\n",
+                  phase,
+                  snapshot.battery_percent,
+                  threshold,
+                  g_config.power.low_battery_wake_interval_minutes,
+                  snapshot.mains_power_present ? "YES" : "NO",
+                  (unsigned)snapshot.vbus_mv,
+                  snapshot.solar_suspect ? "SUSPECT" : "NO");
+    sdcard_append_log("/power.log", String("{\"event\":\"low_battery_sleep\",\"phase\":\"") +
+                                      String(phase ? phase : "") +
+                                      String("\",\"battery_percent\":") +
+                                      String(snapshot.battery_percent) +
+                                      String(",\"threshold_percent\":") +
+                                      String(threshold) +
+                                      String(",\"wake_minutes\":") +
+                                      String(g_config.power.low_battery_wake_interval_minutes) +
+                                      String("}\n"));
+    enter_deep_sleep_until(sleep_seconds, "low_battery_protection");
+    return true;
 }
 
 static void sleep_if_in_configured_window(const char *phase)
@@ -600,6 +667,12 @@ static String make_post_summary_text()
         s += "0";
     s += g_config.power.deep_sleep_end_hour;
     s += ":00\n";
+    s += "power_low_battery_sleep_percent=";
+    s += g_config.power.low_battery_sleep_percent;
+    s += "\n";
+    s += "power_low_battery_wake_interval_minutes=";
+    s += g_config.power.low_battery_wake_interval_minutes;
+    s += "\n";
     s += "power_reboot_cron=";
     s += g_config.power.reboot_cron[0] ? g_config.power.reboot_cron : "-";
     s += "\n";
@@ -685,6 +758,9 @@ static void print_post_summary()
                   g_config.power.deep_sleep,
                   g_config.power.deep_sleep_start_hour,
                   g_config.power.deep_sleep_end_hour);
+    Serial.printf("POST: low_battery_sleep [threshold=%u%% wake_every=%u min]\n",
+                  g_config.power.low_battery_sleep_percent,
+                  g_config.power.low_battery_wake_interval_minutes);
     Serial.printf("POST: reboot_schedule  [cron=%s after_deep_sleep=%s]\n",
                   g_config.power.reboot_cron[0] ? g_config.power.reboot_cron : "-",
                   g_config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO");
@@ -1286,6 +1362,12 @@ static String make_health_log_line(uint32_t now,
     s += g_health.power_valid ? (unsigned)g_health.power.battery_mv : 0;
     s += ",\"vbus_mv\":";
     s += g_health.power_valid ? (unsigned)g_health.power.vbus_mv : 0;
+    s += ",";
+    append_json_bool(s, "mains_power", g_health.power_valid && g_health.power.mains_power_present);
+    s += ",";
+    append_json_bool(s, "solar_suspect", g_health.power_valid && g_health.power.solar_suspect);
+    s += ",";
+    append_json_bool(s, "battery_rising_no_vbus", g_health.power_valid && g_health.power.battery_rising_no_vbus);
     s += "},\"heap_free\":";
     s += ESP.getFreeHeap();
     s += "}\n";
@@ -1343,11 +1425,8 @@ static bool diagnose_and_print_health()
     g_health.power_valid = power_read_snapshot(g_health.power);
     g_health.low_power = false;
     if (g_health.power_valid) {
-        bool external_power_present = g_health.power.vbus_good ||
-                                      g_health.power.vbus_in ||
-                                      g_health.power.vbus_mv > 4200;
         g_health.low_power = g_health.power.battery_present &&
-                             !external_power_present &&
+                             !g_health.power.mains_power_present &&
                              ((g_health.power.battery_percent >= 0 && g_health.power.battery_percent <= 20) ||
                               (g_health.power.battery_mv > 0 && g_health.power.battery_mv < 3500));
     }
@@ -1365,7 +1444,7 @@ static bool diagnose_and_print_health()
     g_health.last_heartbeat_frames = uart_stats.heartbeat_frames;
     g_health.last_error_frames = uart_stats.error_frames;
 
-    Serial.printf("HEALTH: ms=%lu state=%s errors=%s%s%s%s%s%s gv2_delta_bytes=%lu gv2_delta_jpegs=%lu gv2_delta_state=%lu gv2_delta_heartbeats=%lu gv2_delta_errors=%lu battery_pct=%d battery_mv=%u vbus_mv=%u\n",
+    Serial.printf("HEALTH: ms=%lu state=%s errors=%s%s%s%s%s%s gv2_delta_bytes=%lu gv2_delta_jpegs=%lu gv2_delta_state=%lu gv2_delta_heartbeats=%lu gv2_delta_errors=%lu battery_pct=%d battery_mv=%u mains_power=%s vbus_mv=%u solar=%s\n",
                   (unsigned long)now,
                   g_health.has_error ? "ERROR" : "OK",
                   g_health.no_uart_comm ? " no_uart_comm" : "",
@@ -1381,10 +1460,12 @@ static bool diagnose_and_print_health()
                   (unsigned long)delta_errors,
                   g_health.power_valid ? g_health.power.battery_percent : -1,
                   g_health.power_valid ? (unsigned)g_health.power.battery_mv : 0,
-                  g_health.power_valid ? (unsigned)g_health.power.vbus_mv : 0);
+                  (g_health.power_valid && g_health.power.mains_power_present) ? "YES" : "NO",
+                  g_health.power_valid ? (unsigned)g_health.power.vbus_mv : 0,
+                  (g_health.power_valid && g_health.power.solar_suspect) ? "SUSPECT" : "NO");
 
     String heartbeat_time = current_timestamp_compact();
-    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu gv2_heartbeats=%lu gv2_heartbeat_status=%u/%lu gv2_errors=%lu gv2_last_error=%u/%u heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s health=%s low_power=%s\n",
+    Serial.printf("HEARTBEAT: build=post-log-v2 ms=%lu gv2_bytes=%lu gv2_jpegs=%lu gv2_state=%lu gv2_heartbeats=%lu gv2_heartbeat_status=%u/%lu gv2_errors=%lu gv2_last_error=%u/%u heap=%u modem=%s time=%s gnss=%s fix=%s uart=%s sd=%s health=%s low_power=%s mains_power=%s solar=%s\n",
                   (unsigned long)now,
                   (unsigned long)uart_stats.bytes,
                   (unsigned long)uart_stats.jpeg_frames,
@@ -1403,7 +1484,9 @@ static bool diagnose_and_print_health()
                   g_post.gv2_uart ? "OK" : "NO",
                   sdcard_available() ? "OK" : "NO",
                   g_health.has_error ? "ERROR" : "OK",
-                  yn(g_health.low_power));
+                  yn(g_health.low_power),
+                  (g_health.power_valid && g_health.power.mains_power_present) ? "YES" : "NO",
+                  (g_health.power_valid && g_health.power.solar_suspect) ? "SUSPECT" : "NO");
     sdcard_append_log("/health.log",
                       make_health_log_line(now,
                                            delta_bytes,
@@ -1478,6 +1561,10 @@ void setup()
     bool config_loaded = sdcard_load_config(g_config);
     print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
     reboot_after_deep_sleep_wakeup_if_configured();
+
+    g_post.power = power_init(g_config.power);
+    print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
+    sleep_if_battery_too_low("post_power_check");
 
     if (g_config.modem.mode == 0) {
         Serial.println("POST: modem skipped by config mode=0 (no SIM/no modem)");
@@ -1568,9 +1655,6 @@ void setup()
     }
     Serial.flush();
 
-    g_post.power = power_init(g_config.power);
-    print_post_line("power_monitor", g_post.power, g_post.power ? "/power.log" : "unavailable");
-
     sleep_if_in_configured_window("post_time_sync");
 
     bool web_started = web_init(g_config.web);
@@ -1597,6 +1681,7 @@ void setup()
    ========================================================= */
 void loop()
 {
+    sleep_if_battery_too_low("loop");
     sleep_if_in_configured_window("loop");
     reboot_if_cron_matches();
     gv2_uart_poll();
