@@ -91,6 +91,9 @@ external/t-sim-motor-shield/  Submodule: custom PCB / motor shield reference
 tools/image-viewer/           Desktop random image viewer and sample images
 tools/receiver/               Receiver helper scripts
 tools/Himax_AI_web_toolkit/   Local copy of the Himax web flashing toolkit
+tools/power_uptime_visual.py  Builds the power/autonomy CSV and matplotlib timeline
+data/power_uptime_dataset.csv Derived power/autonomy dataset from SD logs
+data/power_uptime_plot.png    Power, operating-state, and temperature graph
 build_gv2_image.ps1           GV2 firmware image build helper
 flash_gv2.ps1                 GV2 firmware and model flash helper
 ```
@@ -165,6 +168,24 @@ The firmware creates or writes these files on the SD card:
 `/frames.log` includes device identity, firmware version, GNSS fields, inference state, bounding box, positive/doubtful filter result, CRC result, actuator result, SMS result, Azure result, cooldown status, and saved filename.
 
 The firmware removes legacy Azure queue files (`/azure_queue.log`, `/azure_queue.work`, `/azure_queue.tmp`) on SD mount. New firmware does not use an upload queue.
+
+## Power Autonomy Analysis
+
+![Power autonomy graph](data/power_uptime_plot.png)
+
+The graph above is generated from the SD-card `health.log` and `power.log` files with:
+
+```powershell
+python tools\power_uptime_visual.py
+```
+
+The derived CSV is written to `data/power_uptime_dataset.csv`. The plotted operating-state line uses `awake` for normal logging/operation and `sleep` for inferred deep-sleep or offline gaps between health records.
+
+From June 18 onward, the logs show a clear low-battery recovery followed by stable solar-supported operation. On June 18, the system clearly entered the 10% battery-protection region: the operating-state line shows repeated sleep/wake behavior, and the battery percentage and voltage start near the low-protection range. Later that day the battery recovers strongly.
+
+On the following sunny days, June 19 and June 20, the system reaches almost full daytime realization, around 99% of the intended active window. The charge and discharge curves are smooth and plausible: the battery charges during sunny periods, discharges under load and overnight, and the PMU temperature follows the expected daytime thermal rise and nighttime cooldown.
+
+This indicates that the 6 W solar panel is likely sufficient for this setup under the measured sunny conditions. The system can recover from low battery, sustain normal daytime operation, and retain enough charge margin across subsequent days.
 
 ## Configuration
 
