@@ -199,9 +199,6 @@ static String current_timestamp_compact()
 
 static bool current_local_time(struct tm &tm)
 {
-    if (!g_post.system_time)
-        return false;
-
     time_t now = time(nullptr);
     if (now <= 1700000000)
         return false;
@@ -313,6 +310,39 @@ static void enter_deep_sleep_until(uint32_t sleep_seconds, const char *reason = 
     esp_deep_sleep_start();
 }
 
+static uint32_t low_battery_sleep_seconds(uint16_t wake_interval_minutes, const char **schedule_note)
+{
+    uint32_t base_seconds = (uint32_t)wake_interval_minutes * 60UL;
+    if (schedule_note)
+        *schedule_note = "hourly_check";
+
+    if (!g_config.power.deep_sleep)
+        return base_seconds;
+
+    struct tm now_tm{};
+    if (!current_local_time(now_tm))
+        return base_seconds;
+
+    if (is_hour_in_sleep_window((uint8_t)now_tm.tm_hour, g_config.power)) {
+        if (schedule_note)
+            *schedule_note = "inside_sleep_window";
+        return seconds_until_sleep_window_end(now_tm, g_config.power);
+    }
+
+    time_t now = time(nullptr);
+    time_t wake_time = now + base_seconds;
+    struct tm wake_tm{};
+    if (wake_time > 1700000000 &&
+        localtime_r(&wake_time, &wake_tm) &&
+        is_hour_in_sleep_window((uint8_t)wake_tm.tm_hour, g_config.power)) {
+        if (schedule_note)
+            *schedule_note = "extended_to_sleep_window_end";
+        return base_seconds + seconds_until_sleep_window_end(wake_tm, g_config.power);
+    }
+
+    return base_seconds;
+}
+
 static bool sleep_if_battery_too_low(const char *phase)
 {
     uint8_t threshold = g_config.power.low_battery_sleep_percent;
@@ -341,25 +371,33 @@ static bool sleep_if_battery_too_low(const char *phase)
                        snapshot.battery_percent >= 0 &&
                        snapshot.battery_percent <= threshold;
     const char *action = low_battery ? "sleep" : "continue";
-    Serial.printf("POWER: low-battery check phase=%s battery_present=%s battery=%d%% battery_mv=%u threshold=%u%% mains_power=%s vbus_mv=%u solar=%s action=%s\n",
-                  phase,
-                  snapshot.battery_present ? "YES" : "NO",
-                  snapshot.battery_percent,
-                  (unsigned)snapshot.battery_mv,
-                  threshold,
-                  snapshot.mains_power_present ? "YES" : "NO",
-                  (unsigned)snapshot.vbus_mv,
-                  snapshot.solar_suspect ? "SUSPECT" : "NO",
-                  action);
+    bool loop_phase = phase && strcmp(phase, "loop") == 0;
+    if (!loop_phase || low_battery) {
+        Serial.printf("POWER: low-battery check phase=%s battery_present=%s battery=%d%% battery_mv=%u threshold=%u%% mains_power=%s vbus_mv=%u solar=%s action=%s\n",
+                      phase,
+                      snapshot.battery_present ? "YES" : "NO",
+                      snapshot.battery_percent,
+                      (unsigned)snapshot.battery_mv,
+                      threshold,
+                      snapshot.mains_power_present ? "YES" : "NO",
+                      (unsigned)snapshot.vbus_mv,
+                      snapshot.solar_suspect ? "SUSPECT" : "NO",
+                      action);
+    }
     if (!low_battery)
         return false;
 
-    uint32_t sleep_seconds = (uint32_t)g_config.power.low_battery_wake_interval_minutes * 60UL;
-    Serial.printf("POWER: low-battery sleep phase=%s battery=%d%% threshold=%u%% wake_minutes=%u mains_power=%s vbus_mv=%u solar=%s\n",
+    const char *schedule_note = nullptr;
+    uint32_t sleep_seconds = low_battery_sleep_seconds(g_config.power.low_battery_wake_interval_minutes,
+                                                       &schedule_note);
+    uint32_t actual_wake_minutes = sleep_seconds / 60UL;
+    Serial.printf("POWER: low-battery sleep phase=%s battery=%d%% threshold=%u%% configured_wake_minutes=%u actual_wake_minutes=%lu schedule=%s mains_power=%s vbus_mv=%u solar=%s\n",
                   phase,
                   snapshot.battery_percent,
                   threshold,
                   g_config.power.low_battery_wake_interval_minutes,
+                  (unsigned long)actual_wake_minutes,
+                  schedule_note ? schedule_note : "-",
                   snapshot.mains_power_present ? "YES" : "NO",
                   (unsigned)snapshot.vbus_mv,
                   snapshot.solar_suspect ? "SUSPECT" : "NO");
@@ -369,8 +407,13 @@ static bool sleep_if_battery_too_low(const char *phase)
                                       String(snapshot.battery_percent) +
                                       String(",\"threshold_percent\":") +
                                       String(threshold) +
-                                      String(",\"wake_minutes\":") +
+                                      String(",\"configured_wake_minutes\":") +
                                       String(g_config.power.low_battery_wake_interval_minutes) +
+                                      String(",\"actual_wake_minutes\":") +
+                                      String((unsigned long)actual_wake_minutes) +
+                                      String(",\"schedule\":\"") +
+                                      String(schedule_note ? schedule_note : "") +
+                                      String("\"") +
                                       String("}\n"));
     enter_deep_sleep_until(sleep_seconds, "low_battery_protection");
     return true;

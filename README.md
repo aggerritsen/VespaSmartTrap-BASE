@@ -322,7 +322,7 @@ The modem APN is selected from SIM identity first (`sim_profiles` by IMSI/ICCID 
 
 `power.reboot_cron` uses a five-field cron-like schedule after valid system time is available. For example, `0 12 * * *` reboots daily at noon. Leave it empty to disable scheduled reboot.
 
-Low-battery protection is separate from the scheduled sleep window. With the default settings, a battery-powered unit sleeps when the PMU reports `10%` or lower and wakes every `60` minutes to re-check the battery. If solar has recovered the battery above the configured threshold, normal startup continues; otherwise it returns to deep sleep before modem, web, stepper, or GV2 runtime work starts.
+Low-battery protection is separate from the scheduled sleep window. With the default settings, a battery-powered unit sleeps when the PMU reports `10%` or lower and wakes every `60` minutes to re-check the battery. If solar has recovered the battery above the configured threshold, normal startup continues; otherwise it returns to deep sleep before modem, web, stepper, or GV2 runtime work starts. If the unit is inside the programmed sleep window, or the next hourly low-battery check would wake inside that window, the firmware sleeps through to the configured wake hour.
 
 ## Build And Flash The Base Firmware
 
