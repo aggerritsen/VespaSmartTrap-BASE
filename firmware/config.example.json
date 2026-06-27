@@ -80,8 +80,8 @@
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
     "reverse_wait_ms": 1000,
-    "start_direction": "ccw",
-    "post_test_enabled": false
+    "start_direction": "cw",
+    "post_test_enabled": true
   },
   "inference": {
     "confidence_threshold": 0.80,
@@ -114,6 +114,7 @@
   },
   "power": {
     "log_interval_seconds": 900,
+    "solar_auto_optimize": true,
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6,

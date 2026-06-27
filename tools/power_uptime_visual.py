@@ -79,6 +79,7 @@ def load_power(path: Path, since: datetime | None) -> list[dict]:
                 "source_line_power": line_number,
                 "power_uptime_ms": record.get("uptime_ms"),
                 "pmu_temp_c": system.get("pmu_temp_c"),
+                "power_battery_present": battery.get("present"),
                 "power_battery_percent": battery.get("percent"),
                 "power_battery_mv": battery.get("mv"),
                 "power_vbus_mv": input_power.get("vbus_mv"),
@@ -143,6 +144,7 @@ def build_rows(health_records: list[dict], power_records: list[dict]) -> list[di
             "low_power": record.get("low_power"),
             "battery_percent": record.get("battery_percent"),
             "battery_mv": record.get("battery_mv"),
+            "battery_present": nearest_power.get("power_battery_present") if nearest_power else None,
             "vbus_mv": record.get("vbus_mv"),
             "mains_power": record.get("mains_power"),
             "pmu_temp_c": nearest_power.get("pmu_temp_c") if nearest_power else None,
@@ -180,6 +182,7 @@ def write_csv(rows: list[dict], path: Path) -> None:
         "low_power",
         "battery_percent",
         "battery_mv",
+        "battery_present",
         "vbus_mv",
         "mains_power",
         "pmu_temp_c",
@@ -203,8 +206,8 @@ def write_plot(rows: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     timestamps = [parse_timestamp(row["timestamp"]) for row in rows]
-    battery_percent = [as_float(row["battery_percent"]) for row in rows]
-    battery_voltage = [as_float(row["battery_mv"]) / 1000.0 for row in rows]
+    battery_percent = [plot_battery_percent(row) for row in rows]
+    battery_voltage = [plot_battery_voltage(row) for row in rows]
     pmu_temp = [as_float(row["pmu_temp_c"]) for row in rows]
     state_times, state_values = build_operating_state_series(rows)
 
@@ -263,6 +266,20 @@ def as_float(value) -> float:
     if value in (None, ""):
         return float("nan")
     return float(value)
+
+
+def plot_battery_percent(row: dict) -> float:
+    value = as_float(row["battery_percent"])
+    if value < 0:
+        return float("nan")
+    return value
+
+
+def plot_battery_voltage(row: dict) -> float:
+    value = as_float(row["battery_mv"])
+    if value <= 0:
+        return float("nan")
+    return value / 1000.0
 
 
 def main() -> int:

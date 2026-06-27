@@ -695,6 +695,9 @@ static String make_post_summary_text()
     s += "power_log_interval_seconds=";
     s += g_config.power.log_interval_seconds;
     s += "\n";
+    s += "power_solar_auto_optimize=";
+    s += g_config.power.solar_auto_optimize ? "YES" : "NO";
+    s += "\n";
     s += "health_led=";
     s += g_config.health.led;
     s += "\n";
@@ -785,6 +788,7 @@ static void print_post_summary()
     Serial.printf("POST: stepper_direction [%s]\n", g_config.stepper.start_direction);
     Serial.printf("POST: stepper_post_test [%s]\n", g_config.stepper.post_test_enabled ? "YES" : "NO");
     Serial.printf("POST: power_log_every  [%lu seconds]\n", (unsigned long)g_config.power.log_interval_seconds);
+    Serial.printf("POST: solar_auto_optimize [%s]\n", g_config.power.solar_auto_optimize ? "YES" : "NO");
     Serial.printf("POST: health_led       [%u]\n", g_config.health.led);
     Serial.printf("POST: modem_mode      [%u] apn=[%s] direct_sms=[%s] apn_autodetect=[%s] apn_test_all=[%s] validate_http_egress=[%s] operator_auto_select=[%s] candidates=[%u] lookup=[%s,%s]\n",
                   g_config.modem.mode,
@@ -1704,6 +1708,7 @@ void setup()
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
 
     stepper_init(g_config.stepper);
+    stepper_run_status_led_post_test();
     if (g_config.stepper.post_test_enabled) {
         stepper_run_post_test_cycle();
     } else {

@@ -6,8 +6,8 @@ struct StepperConfig {
     uint16_t rotation_degrees = 90;
     uint16_t steps_per_revolution = 2048;
     uint16_t reverse_wait_ms = 1000;
-    char start_direction[17] = "ccw";
-    bool post_test_enabled = false;
+    char start_direction[17] = "cw";
+    bool post_test_enabled = true;
 };
 
 struct UartConfig {
@@ -58,6 +58,7 @@ struct FeaturesConfig {
 
 struct PowerConfig {
     uint32_t log_interval_seconds = 900;
+    bool solar_auto_optimize = true;
     uint8_t deep_sleep = 2;
     uint8_t deep_sleep_start_hour = 18;
     uint8_t deep_sleep_end_hour = 6;

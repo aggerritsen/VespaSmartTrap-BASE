@@ -19,9 +19,11 @@ The current base firmware provides the following operational features:
 - Binary UART receiver for the Grove Vision AI V2 module using `VSTS` state frames and `VSTJ` JPEG frames with metadata and CRC32 validation.
 - Inference filtering by class, positive confidence threshold, doubtful confidence threshold, and consecutive occurrence count before actuation.
 - TB6612FNG stepper output for a configurable actuator cycle, including an optional boot-time POST cycle and a detection-triggered cycle.
+- Short status LED POST test on GPIO 3 / D0 before runtime health LED policy is applied.
 - WiFi web view in access-point or station mode, serving the latest verified frame and inference metadata over HTTP.
 - JSON Lines frame logging with timestamp, GNSS data, inference result, bounding box, CRC status, actuator result, SMS/Azure result, saved filename, and firmware identity.
 - Power telemetry logging to `/power.log` at a configurable interval.
+- Solar auto-optimize mode that forces low-power runtime behavior from config: no WiFi, health LED off, GNSS sampled once during boot, modem powered down after POST and runtime uploads, longer sleep protection, and reduced optional network checks.
 - GV2 power control on the custom PCB: power down before deep sleep, power up after wake, and a short reset cycle before UART receive starts.
 - Helper scripts for building and flashing the Grove Vision AI V2 firmware image and model.
 - [VSTtool](https://vsttool.org) support for flashing firmware to the MCUs used in the project.
@@ -114,8 +116,9 @@ At startup the receiver:
 8. Powers the modem down after POST unless `modem.keep_alive_after_post` is true.
 9. Starts the WiFi web service when enabled.
 10. Initializes power telemetry and the stepper actuator.
-11. Runs the optional stepper POST cycle when `stepper.post_test_enabled` is true.
-12. Reset-cycles GV2 power on GPIO 43, starts GV2 UART, writes `/post.log`, and enters receive mode.
+11. Runs a short status LED POST test on GPIO 3 / D0.
+12. Runs the optional stepper POST cycle when `stepper.post_test_enabled` is true.
+13. Reset-cycles GV2 power on GPIO 43, starts GV2 UART, writes `/post.log`, and enters receive mode.
 
 ## UART Protocol
 
@@ -259,8 +262,8 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
     "reverse_wait_ms": 1000,
-    "start_direction": "ccw",
-    "post_test_enabled": false
+    "start_direction": "cw",
+    "post_test_enabled": true
   },
   "inference": {
     "confidence_threshold": 0.80,
@@ -277,6 +280,7 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
   },
   "power": {
     "log_interval_seconds": 900,
+    "solar_auto_optimize": true,
     "deep_sleep": 2,
     "deep_sleep_start_hour": 18,
     "deep_sleep_end_hour": 6,
@@ -312,6 +316,177 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
 }
 ```
 
+The default file deliberately keeps ordinary VBUS-friendly values such as `web.mode=2`, `health.led=1`, and `inference.upload_doubtful_to_azure=true`, but `power.solar_auto_optimize` is `true` by default. On boot, that flag converts the loaded configuration to the lower-power effective runtime settings listed below. Set `power.solar_auto_optimize=false` to use the explicit values as-is, for example in VBUS/debug mode.
+
+### Power Profiles
+
+Use `power.solar_auto_optimize` as the profile switch. When it is `false`, the firmware follows the explicit values in `/config.json`. When it is `true`, the firmware keeps the configured identity, APN, inference class, thresholds, actuator settings, and upload credentials, but applies the lowest-power runtime policy after config parsing.
+
+Solar auto-optimize forces these effective settings at runtime:
+
+```json
+{
+  "features": {
+    "gnss_probe": true
+  },
+  "time": {
+    "network_timeout_seconds": 30,
+    "allow_gnss_fallback": true
+  },
+  "modem": {
+    "keep_alive_after_post": false,
+    "wake_for_runtime_sms": true,
+    "apn_test_all": false,
+    "validate_http_egress": false
+  },
+  "inference": {
+    "upload_doubtful_to_azure": false
+  },
+  "power": {
+    "deep_sleep": 2,
+    "deep_sleep_start_hour": 18,
+    "deep_sleep_end_hour": 8,
+    "low_battery_sleep_percent": 25,
+    "low_battery_wake_interval_minutes": 120
+  },
+  "health": {
+    "led": 0
+  },
+  "azure": {
+    "cooldown_minutes": 60,
+    "failure_cooldown_seconds": 1800,
+    "runtime_connect_timeout_seconds": 20
+  },
+  "sms": {
+    "post_test_enabled": false
+  },
+  "web": {
+    "mode": 0
+  }
+}
+```
+
+Recommended Solar profile:
+
+```json
+{
+  "features": {
+    "gnss_probe": true,
+    "ack_frames": true
+  },
+  "time": {
+    "network_timeout_seconds": 30,
+    "allow_gnss_fallback": true
+  },
+  "modem": {
+    "mode": 2,
+    "apn": "onomondo",
+    "apn_autodetect": true,
+    "apn_test_all": false,
+    "validate_http_egress": false,
+    "operator_auto_select": true,
+    "keep_alive_after_post": false,
+    "wake_for_runtime_sms": true
+  },
+  "inference": {
+    "confidence_threshold": 0.80,
+    "doubtful_confidence_threshold": 0.70,
+    "upload_doubtful_to_azure": false,
+    "detected_class": 3,
+    "occurrence": 3
+  },
+  "power": {
+    "log_interval_seconds": 900,
+    "solar_auto_optimize": true,
+    "deep_sleep": 2,
+    "deep_sleep_start_hour": 18,
+    "deep_sleep_end_hour": 8,
+    "low_battery_sleep_percent": 25,
+    "low_battery_wake_interval_minutes": 120,
+    "reboot_cron": "",
+    "reboot_after_deep_sleep_wakeup": false
+  },
+  "health": {
+    "led": 0
+  },
+  "azure": {
+    "cooldown_minutes": 60,
+    "failure_cooldown_seconds": 1800,
+    "runtime_connect_timeout_seconds": 20
+  },
+  "sms": {
+    "enabled": false,
+    "post_test_enabled": false
+  },
+  "web": {
+    "mode": 0
+  }
+}
+```
+
+In this profile GNSS is sampled once during boot with `AT+CGNSPWR=1`, the resulting trusted location/time is kept in memory and logs, and the modem is powered down after POST. Runtime Azure/SMS paths wake LTE only for the transfer window and power it down again. The health LED is off to avoid continuous indicator draw.
+
+The measured solar logs support stopping at `18:00`: it avoids evening discharge and preserves battery for the next boot. Starting at `08:00` is practical, but `09:00` or `10:00` is safer for maximum autonomy. For a harsher winter or cloudy profile, use `deep_sleep_start_hour=17` and `deep_sleep_end_hour=10`.
+
+Recommended VBUS profile:
+
+```json
+{
+  "features": {
+    "gnss_probe": true,
+    "ack_frames": true
+  },
+  "time": {
+    "network_timeout_seconds": 60,
+    "allow_gnss_fallback": true
+  },
+  "modem": {
+    "mode": 2,
+    "apn": "onomondo",
+    "apn_autodetect": true,
+    "apn_test_all": false,
+    "validate_http_egress": false,
+    "operator_auto_select": true,
+    "keep_alive_after_post": false,
+    "wake_for_runtime_sms": true
+  },
+  "inference": {
+    "confidence_threshold": 0.80,
+    "doubtful_confidence_threshold": 0.70,
+    "upload_doubtful_to_azure": true,
+    "detected_class": 3,
+    "occurrence": 3
+  },
+  "power": {
+    "log_interval_seconds": 900,
+    "solar_auto_optimize": false,
+    "deep_sleep": 0,
+    "deep_sleep_start_hour": 18,
+    "deep_sleep_end_hour": 6,
+    "low_battery_sleep_percent": 10,
+    "low_battery_wake_interval_minutes": 60,
+    "reboot_cron": "",
+    "reboot_after_deep_sleep_wakeup": false
+  },
+  "health": {
+    "led": 1
+  },
+  "azure": {
+    "cooldown_minutes": 15,
+    "failure_cooldown_seconds": 120,
+    "runtime_connect_timeout_seconds": 20
+  },
+  "web": {
+    "mode": 2,
+    "ssid": "VST-BASE",
+    "password": "",
+    "append_mac": true
+  }
+}
+```
+
+VBUS mode can keep the health LED and web AP enabled for field inspection. Keep `modem.keep_alive_after_post=false` unless you are actively debugging LTE behavior; runtime upload and SMS already wake the modem when needed.
+
 `device_name` is suffixed at runtime with the WiFi MAC suffix, matching the web SSID style, for example `VST-BASE-A62E94`. `web.mode` values are `0` for disabled, `1` for WiFi station mode, and `2` for access-point mode. `stepper.start_direction` accepts common clockwise and counter-clockwise forms such as `cw`, `clockwise`, `ccw`, and `anti-clockwise`.
 
 Azure upload is runtime-only. A saved positive or configured doubtful image is uploaded immediately when the Azure cooldown allows. If cooldown is active the image remains saved on SD but is not queued. If upload fails, the failure cooldown is applied and the image is not queued.
@@ -322,7 +497,7 @@ The modem APN is selected from SIM identity first (`sim_profiles` by IMSI/ICCID 
 
 `power.reboot_cron` uses a five-field cron-like schedule after valid system time is available. For example, `0 12 * * *` reboots daily at noon. Leave it empty to disable scheduled reboot.
 
-Low-battery protection is separate from the scheduled sleep window. With the default settings, a battery-powered unit sleeps when the PMU reports `10%` or lower and wakes every `60` minutes to re-check the battery. If solar has recovered the battery above the configured threshold, normal startup continues; otherwise it returns to deep sleep before modem, web, stepper, or GV2 runtime work starts. If the unit is inside the programmed sleep window, or the next hourly low-battery check would wake inside that window, the firmware sleeps through to the configured wake hour.
+Low-battery protection is separate from the scheduled sleep window. With `power.solar_auto_optimize=true`, a battery-powered unit sleeps when the PMU reports `25%` or lower and wakes every `120` minutes to re-check the battery. If solar has recovered the battery above the configured threshold, normal startup continues; otherwise it returns to deep sleep before modem, web, stepper, or GV2 runtime work starts. If the unit is inside the programmed sleep window, or the next low-battery check would wake inside that window, the firmware sleeps through to the configured wake hour. With `power.solar_auto_optimize=false`, the explicit configured low-battery threshold and wake interval are used.
 
 ## Build And Flash The Base Firmware
 

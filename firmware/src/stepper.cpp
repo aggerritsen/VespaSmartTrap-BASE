@@ -239,6 +239,21 @@ void stepper_run_post_test_cycle()
     Serial.printf("STEPPER: POST test cycle %s\n", ok ? "done" : "skipped");
 }
 
+void stepper_run_status_led_post_test()
+{
+    if (!g_stepper_ready)
+        return;
+
+    Serial.printf("STEPPER: status LED POST test begin gpio=%d\n", PIN_RIGHT_LED);
+    for (uint8_t i = 0; i < 3; i++) {
+        set_right_led(true);
+        delay(150);
+        set_right_led(false);
+        delay(150);
+    }
+    Serial.println("STEPPER: status LED POST test done");
+}
+
 void stepper_set_status_led(bool active)
 {
     if (!g_stepper_ready)
