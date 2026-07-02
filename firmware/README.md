@@ -315,3 +315,53 @@ cd firmware
 - WiFi and WebServer from the ESP32 Arduino core
 - ArduinoJson for `/config.json`
 - ESP-IDF helpers through the Arduino build
+
+## Troubleshooting
+
+### macOS: `tool-mkspiffs` install fails with `TLSV1_ALERT_INTERNAL_ERROR`
+
+On a fresh macOS PlatformIO install the build may loop on:
+
+```
+Tool Manager: Installing platformio/tool-mkspiffs @ ~2.230.0
+Tool Manager: Warning! Package Mirror: HTTPSConnectionPool(host='usc1.contabostorage.com', ...)
+  ... SSLError(1, '[SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error')
+Tool Manager: Looking for another mirror...
+```
+
+The PlatformIO registry redirects `tool-mkspiffs` downloads to a Contabo S3 mirror that intermittently fails the TLS handshake. The partition table (`huge_app.csv`) declares a SPIFFS partition, so the ESP32 builder requires the tool and the build cannot proceed.
+
+Workaround: install the matching upstream binary from the `igrr/mkspiffs` GitHub release directly into the PlatformIO packages folder.
+
+```bash
+# 1. Download the arduino-esp32 build (= PlatformIO version 2.230.0)
+curl -L -o /tmp/mkspiffs.tar.gz \
+  https://github.com/igrr/mkspiffs/releases/download/0.2.3/mkspiffs-0.2.3-arduino-esp32-osx.tar.gz
+mkdir -p /tmp/mkspiffs-install && tar xzf /tmp/mkspiffs.tar.gz -C /tmp/mkspiffs-install
+
+# 2. Install into the PlatformIO packages directory
+DEST=~/.platformio/packages/tool-mkspiffs
+rm -rf "$DEST" && mkdir -p "$DEST"
+cp /tmp/mkspiffs-install/mkspiffs-0.2.3-arduino-esp32-osx/mkspiffs "$DEST/mkspiffs"
+chmod +x "$DEST/mkspiffs"
+
+# 3. Add metadata so PlatformIO treats the tool as already installed
+cat > "$DEST/package.json" <<'JSON'
+{
+  "name": "tool-mkspiffs",
+  "version": "2.230.0",
+  "description": "Tool to build and unpack SPIFFS images",
+  "keywords": ["tools", "build tools", "filesystem"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/igrr/mkspiffs" }
+}
+JSON
+
+cat > "$DEST/.piopm" <<'JSON'
+{"type": "tool", "name": "tool-mkspiffs", "version": "2.230.0", "spec": {"owner": "platformio", "id": 8174, "name": "tool-mkspiffs", "requirements": null, "uri": null}}
+JSON
+```
+
+Verify with `~/.platformio/packages/tool-mkspiffs/mkspiffs --version` (should print `mkspiffs ver. 0.2.3` / `Build configuration name: arduino-esp32`). Re-run `platformio run --environment t-sim7080g-s3` and the tool installer should be skipped. The upstream `arduino-esp32` build is the same source PlatformIO repackages as `2.230.0`, so SPIFFS image layout is identical.
+
+Once the Contabo mirror is fixed (or PlatformIO publishes an `arm64` build), delete `~/.platformio/packages/tool-mkspiffs` and let PlatformIO re-install normally.

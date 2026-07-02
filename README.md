@@ -532,10 +532,22 @@ Build the GV2 firmware image:
 .\build_gv2_image.ps1
 ```
 
+macOS and Linux users can use the cross-platform Python port instead:
+
+```bash
+python3 build_gv2_image.py
+```
+
 Flash the GV2 firmware image and model:
 
 ```powershell
 .\flash_gv2.ps1 -Port COM7
+```
+
+macOS and Linux users can use the cross-platform Python port instead:
+
+```bash
+python3 flash_gv2.py --port /dev/tty.usbmodemXXXX
 ```
 
 The flash helper uses `external/gv2-firmware/xmodem/xmodem_send.py` and expects the generated image at:
@@ -545,6 +557,20 @@ external/gv2-firmware/we2_image_gen_local/output_case1_sec_wlcsp/output.img
 ```
 
 Large model binaries should remain in the GV2 firmware submodule unless they are intentionally copied into this repository for a release package.
+
+### Python Setup For Helper Scripts
+
+`flash_gv2.py` (and the underlying `external/gv2-firmware/xmodem/xmodem_send.py`) depend on `pyserial` and `xmodem`. `build_gv2_image.py` and `firmware/get-platformio.py` are stdlib-only and need no extra packages, but installing them into the same environment is harmless.
+
+Modern macOS and many Linux distributions ship a Python that refuses `pip install` outside a virtual environment (`error: externally-managed-environment`). Create a project-local venv once and reuse it for all helper scripts:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate            # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+After activation, `python3 flash_gv2.py --port ...` will pick up `pyserial` and `xmodem` from the venv. The `tools/image-viewer/` desktop viewer keeps its own `requirements.txt` (`pillow`) because it is an unrelated tool with a distinct dependency.
 
 ## Dependencies
 
