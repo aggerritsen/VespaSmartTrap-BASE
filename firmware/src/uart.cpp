@@ -62,6 +62,7 @@ struct JpegRxState {
     uint8_t legacy_prefix_len = 0;
     uint32_t image_counter = 0;
     uint16_t detection_streak = 0;
+    uint32_t detection_window_start_ms = 0;
 };
 
 struct StateRxState {
@@ -552,6 +553,45 @@ static uint16_t configured_occurrence()
     return occurrence == 0 ? 1 : occurrence;
 }
 
+static uint32_t configured_occurrence_window_ms()
+{
+    const BaseConfig *cfg = log_config;
+    uint16_t seconds = cfg ? cfg->inference.occurrence_window_seconds : InferenceConfig{}.occurrence_window_seconds;
+    if (seconds == 0)
+        seconds = InferenceConfig{}.occurrence_window_seconds;
+    return (uint32_t)seconds * 1000UL;
+}
+
+static uint16_t update_detection_occurrence(bool filter_match)
+{
+    uint32_t now = millis();
+    uint32_t window_ms = configured_occurrence_window_ms();
+
+    if (jpeg_rx.detection_streak > 0 &&
+        (uint32_t)(now - jpeg_rx.detection_window_start_ms) > window_ms) {
+        jpeg_rx.detection_streak = 0;
+        jpeg_rx.detection_window_start_ms = 0;
+    }
+
+    if (!filter_match)
+        return jpeg_rx.detection_streak;
+
+    if (jpeg_rx.detection_streak == 0) {
+        jpeg_rx.detection_window_start_ms = now;
+        jpeg_rx.detection_streak = 1;
+    } else if (jpeg_rx.detection_streak < UINT16_MAX) {
+        jpeg_rx.detection_streak++;
+    }
+
+    return jpeg_rx.detection_streak;
+}
+
+static void reset_detection_occurrence()
+{
+    jpeg_rx.detection_streak = 0;
+    jpeg_rx.detection_window_start_ms = 0;
+}
+
 static bool azure_saved_image_upload_enabled()
 {
     const BaseConfig *cfg = log_config;
@@ -962,6 +1002,8 @@ static void append_frame_log(bool saved,
     s += inference.detected_class;
     s += ",\"occurrence_required\":";
     s += configured_occurrence();
+    s += ",\"occurrence_window_seconds\":";
+    s += (unsigned)(configured_occurrence_window_ms() / 1000UL);
     s += ",\"occurrence_count\":";
     s += (unsigned)jpeg_rx.detection_streak;
     s += ",\"filter_match\":";
@@ -1220,15 +1262,10 @@ void gv2_uart_poll()
                 bool valid = jpeg_rx.frame_has_crc32 && crc_ok && jpeg_sanity_check(jpeg_rx.jpeg_buf, payload_len);
                 bool filter_match = frame_matches_class_and_confidence(valid);
                 bool doubtful_match = frame_matches_doubtful_confidence(valid);
-                if (filter_match) {
-                    if (jpeg_rx.detection_streak < UINT16_MAX)
-                        jpeg_rx.detection_streak++;
-                } else {
-                    jpeg_rx.detection_streak = 0;
-                }
+                uint16_t occurrence_count = update_detection_occurrence(filter_match);
 
                 uint16_t occurrence = configured_occurrence();
-                bool detection_match = filter_match && jpeg_rx.detection_streak >= occurrence;
+                bool detection_match = filter_match && occurrence_count >= occurrence;
                 bool save_doubtful = !detection_match &&
                                      doubtful_match &&
                                      log_config &&
@@ -1322,7 +1359,7 @@ void gv2_uart_poll()
 
                 jpeg_rx.receiving_jpeg = false;
                 stats.jpeg_frames++;
-                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s doubtful_match=%s occurrence=%u/%u detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu azure=%s azure_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
+                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s doubtful_match=%s occurrence=%u/%u occurrence_window_s=%lu detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu azure=%s azure_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
                               (unsigned long)jpeg_rx.image_counter,
                               (unsigned long)jpeg_rx.frame_len,
                               (unsigned)payload_len,
@@ -1343,6 +1380,7 @@ void gv2_uart_poll()
                               doubtful_match ? "YES" : "NO",
                               jpeg_rx.detection_streak,
                               occurrence,
+                              (unsigned long)(configured_occurrence_window_ms() / 1000UL),
                               detection_match ? "YES" : "NO",
                               saved ? "YES" : "NO",
                               saved ? filename : "",
@@ -1356,7 +1394,7 @@ void gv2_uart_poll()
                               payload_len >= 2 ? jpeg_rx.jpeg_buf[payload_len - 2] : 0,
                               payload_len >= 2 ? jpeg_rx.jpeg_buf[payload_len - 1] : 0);
                 if (detection_match)
-                    jpeg_rx.detection_streak = 0;
+                    reset_detection_occurrence();
                 free(jpeg_rx.jpeg_buf);
                 jpeg_rx.jpeg_buf = nullptr;
                 jpeg_rx.jpeg_offset = 0;

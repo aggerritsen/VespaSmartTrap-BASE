@@ -2,7 +2,7 @@
 
 This PlatformIO project contains the owned receiver firmware for the VST-BASE T-SIM7080G-S3 base unit.
 
-The firmware receives binary inference state and JPEG frames from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes POST/frame logs, validates inference/JPEG frames, runs the configured stepper actuator cycle after consecutive matching detections, and saves matching JPEGs to SD.
+The firmware receives binary inference state and JPEG frames from the Grove Vision AI V2 stick-on module over the custom PCB UART link. It performs boot diagnostics, initializes the modem and SD card, writes POST/frame logs, validates inference/JPEG frames, runs the configured stepper actuator cycle after enough matching detections within the configured occurrence window, and saves matching JPEGs to SD.
 
 ## Hardware Role
 
@@ -105,7 +105,7 @@ The JPEG header contains the best detection box from the GV2 inference result as
 | State frame | Read one state byte and update diagnostics |
 | Heartbeat frame | Read status and counter so health checks can distinguish "GV2 alive, no JPEG yet" from a dead camera path |
 | JPEG header | Read state, class, confidence, bounding box, payload length, and CRC32 |
-| JPEG payload | Read exactly the declared JPEG bytes into RAM, validate CRC32/JPEG structure, update the consecutive detection count, actuate and save only on a configured detection match, and append `/frames.log` |
+| JPEG payload | Read exactly the declared JPEG bytes into RAM, validate CRC32/JPEG structure, update the detection occurrence count, actuate and save only on a configured detection match, and append `/frames.log` |
 
 The parser continuously scans for magic bytes when idle, so it can resynchronize after noise or a discarded invalid frame.
 
@@ -118,10 +118,10 @@ Before saving an image, the firmware checks:
 - CRC32 over the received JPEG bytes matches the sender header.
 - Inference confidence is equal to or greater than `inference.confidence_threshold`.
 - Inference class equals `inference.detected_class`, unless the configured class is `-1`.
-- The class/confidence filter has matched for `inference.occurrence` consecutive valid frames.
+- The class/confidence filter has matched for `inference.occurrence` valid frames within `inference.occurrence_window_seconds`.
 - SD card availability.
 
-Invalid frames and non-matching detections are logged but not saved. Once the configured consecutive occurrence count is reached, the receiver runs the configured stepper actuator cycle first, flushes and resynchronizes the GV2 UART stream after the blocking actuator cycle, then saves the triggering JPEG. The detection occurrence counter is reset after a completed actuator event so a fresh run of consecutive matches is required before the next cycle.
+Invalid frames and non-matching detections are logged but not saved. Once the configured occurrence count is reached inside the configured time window, the receiver runs the configured stepper actuator cycle first, flushes and resynchronizes the GV2 UART stream after the blocking actuator cycle, then saves the triggering JPEG. The detection occurrence counter is reset after a completed actuator event so a fresh set of matches is required before the next cycle.
 
 ## SD Card Output
 
@@ -272,7 +272,7 @@ During POST, missing `/config.json` fields are added back to the SD card from `c
 
 When enabled, open the IP printed as `WEB: ... ip=...` in the serial monitor. The page polls `/state.json` for inference metadata and fetches `/frame.jpg` only when a new verified frame id arrives, keeping the display path binary JPEG instead of base64. CRC-bad or structurally invalid JPEGs are logged but do not replace the last good web frame.
 
-The default `steps_per_revolution` is `2048` for a 28BYJ-48 in full-step mode. `stepper.start_direction` accepts `clockwise`/`cw` or `anti-clockwise`/`ccw` and controls the first rotation of each POST or detection actuator cycle; the return rotation always runs in the opposite direction by the same amount. `inference.confidence_threshold` is a `0.0` to `1.0` threshold, `inference.detected_class` is the target class index, and `inference.occurrence` is the number of consecutive matching detections required before actuation and saving. Use `-1` for `detected_class` to accept any class.
+The default `steps_per_revolution` is `2048` for a 28BYJ-48 in full-step mode. `stepper.start_direction` accepts `clockwise`/`cw` or `anti-clockwise`/`ccw` and controls the first rotation of each POST or detection actuator cycle; the return rotation always runs in the opposite direction by the same amount. `inference.confidence_threshold` is a `0.0` to `1.0` threshold, `inference.detected_class` is the target class index, `inference.occurrence` is the number of matching detections required, and `inference.occurrence_window_seconds` is the time window for those matches. Use `-1` for `detected_class` to accept any class.
 
 ## Build And Flash
 

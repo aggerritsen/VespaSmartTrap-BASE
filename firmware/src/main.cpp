@@ -692,6 +692,9 @@ static String make_post_summary_text()
     s += "inference_occurrence=";
     s += g_config.inference.occurrence;
     s += "\n";
+    s += "inference_occurrence_window_seconds=";
+    s += g_config.inference.occurrence_window_seconds;
+    s += "\n";
     s += "power_log_interval_seconds=";
     s += g_config.power.log_interval_seconds;
     s += "\n";
@@ -815,12 +818,13 @@ static void print_post_summary()
                   (unsigned long)g_config.azure.cooldown_minutes,
                   (unsigned long)g_config.azure.failure_cooldown_seconds,
                   g_config.azure.runtime_connect_timeout_seconds);
-    Serial.printf("POST: inference_filter  [class=%d positive>=%.3f doubtful>=%.3f upload_doubtful_to_azure=%s occurrence=%u]\n",
+    Serial.printf("POST: inference_filter  [class=%d positive>=%.3f doubtful>=%.3f upload_doubtful_to_azure=%s occurrence=%u window=%u sec]\n",
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
                   g_config.inference.doubtful_confidence_threshold,
                   g_config.inference.upload_doubtful_to_azure ? "YES" : "NO",
-                  g_config.inference.occurrence);
+                  g_config.inference.occurrence,
+                  g_config.inference.occurrence_window_seconds);
     print_post_line("modem_at", g_post.modem_ready);
     if (g_config.modem.mode == 2)
         print_post_line("modem_ltem", g_post.modem_ltem, g_post.modem_ltem ? "bearer/ip validated" : "attach failed");

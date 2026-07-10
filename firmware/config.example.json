@@ -89,6 +89,7 @@
     "upload_doubtful_to_azure": true,
     "detected_class": 3,
     "occurrence": 3,
+    "occurrence_window_seconds": 30,
     "class_names": [
       {
         "class": 0,

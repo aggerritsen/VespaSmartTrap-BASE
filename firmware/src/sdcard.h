@@ -29,6 +29,7 @@ struct InferenceConfig {
     float doubtful_confidence_threshold = 0.70f;
     int16_t detected_class = 3;
     uint16_t occurrence = 3;
+    uint16_t occurrence_window_seconds = 30;
     bool upload_doubtful_to_azure = true;
     uint8_t class_name_count = 4;
     ClassName class_names[MAX_CLASS_NAMES] = {

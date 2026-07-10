@@ -17,7 +17,7 @@ The current base firmware provides the following operational features:
 - Runtime SMS notification after positive detections, with provider-aware direct-SMS gating, recipient list, and cooldown.
 - GNSS probing through the SIM7080 command interface, with optional GNSS UTC fallback when network time is unavailable and a trusted position is present.
 - Binary UART receiver for the Grove Vision AI V2 module using `VSTS` state frames and `VSTJ` JPEG frames with metadata and CRC32 validation.
-- Inference filtering by class, positive confidence threshold, doubtful confidence threshold, and consecutive occurrence count before actuation.
+- Inference filtering by class, positive confidence threshold, doubtful confidence threshold, and occurrence count within a configurable time window before actuation.
 - TB6612FNG stepper output for a configurable actuator cycle, including an optional boot-time POST cycle and a detection-triggered cycle.
 - Short status LED POST test on GPIO 3 / D0 before runtime health LED policy is applied.
 - WiFi web view in access-point or station mode, serving the latest verified frame and inference metadata over HTTP.
@@ -148,10 +148,11 @@ The receiver evaluates each valid JPEG frame against the configured inference fi
 - `confidence_threshold`: required confidence as `0.0` to `1.0`.
 - `doubtful_confidence_threshold`: lower confidence band used for evidence-only Azure upload.
 - `detected_class`: target class index, or `-1` to accept any class.
-- `occurrence`: number of consecutive matching frames required.
+- `occurrence`: number of matching frames required inside the occurrence window.
+- `occurrence_window_seconds`: time window in which the required matches must occur.
 - `upload_doubtful_to_azure`: when true, saves and runtime-uploads matching-class frames between the doubtful and positive thresholds.
 
-When the positive threshold and occurrence count are reached, the firmware runs the configured stepper actuator cycle, flushes and resynchronizes the UART receive path after the blocking actuator movement, saves the triggering JPEG when the SD card is available, optionally sends SMS, and attempts runtime Azure upload. The occurrence counter resets after the actuator event.
+When the positive threshold and occurrence count are reached inside the configured window, the firmware runs the configured stepper actuator cycle, flushes and resynchronizes the UART receive path after the blocking actuator movement, saves the triggering JPEG when the SD card is available, optionally sends SMS, and attempts runtime Azure upload. The occurrence counter resets after the actuator event.
 
 Doubtful frames do not trigger the stepper and do not send SMS. When enabled, they are saved and sent through the same runtime Azure upload path.
 
@@ -271,6 +272,7 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
     "upload_doubtful_to_azure": true,
     "detected_class": 3,
     "occurrence": 3,
+    "occurrence_window_seconds": 30,
     "class_names": [
       { "class": 0, "short": "amel", "name": "Apis mellifera" },
       { "class": 1, "short": "vcra", "name": "Vespa crabro" },
@@ -393,7 +395,8 @@ Recommended Solar profile:
     "doubtful_confidence_threshold": 0.70,
     "upload_doubtful_to_azure": false,
     "detected_class": 3,
-    "occurrence": 3
+    "occurrence": 3,
+    "occurrence_window_seconds": 30
   },
   "power": {
     "log_interval_seconds": 900,
@@ -455,7 +458,8 @@ Recommended VBUS profile:
     "doubtful_confidence_threshold": 0.70,
     "upload_doubtful_to_azure": true,
     "detected_class": 3,
-    "occurrence": 3
+    "occurrence": 3,
+    "occurrence_window_seconds": 30
   },
   "power": {
     "log_interval_seconds": 900,

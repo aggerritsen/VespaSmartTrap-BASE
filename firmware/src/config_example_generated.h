@@ -94,6 +94,7 @@ static constexpr const char *CONFIG_EXAMPLE_JSON =
     "    \"upload_doubtful_to_azure\": true,\n"
     "    \"detected_class\": 3,\n"
     "    \"occurrence\": 3,\n"
+    "    \"occurrence_window_seconds\": 30,\n"
     "    \"class_names\": [\n"
     "      {\n"
     "        \"class\": 0,\n"
