@@ -6,4 +6,4 @@ The custom PCB provides the mechanical and electrical attachment between the T-S
 external/t-sim-motor-shield/
 ```
 
-Use that repo for PCB source, documentation, and motor shield validation firmware. Keep base application firmware in `firmware/`.
+Use that repo for PCB source, documentation, and motor shield validation firmware. Keep base application firmware in `t-sim/firmware/`.

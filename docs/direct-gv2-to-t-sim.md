@@ -9,7 +9,7 @@ external/t-sim-motor-shield/
 The firmware-side receive path belongs in:
 
 ```text
-firmware/src/
+t-sim/firmware/src/
 ```
 
 ## UART Framing

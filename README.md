@@ -57,7 +57,7 @@ The T-SIM7080G-S3 is the base controller. The Grove Vision AI V2 is treated as a
 | --- | --- |
 | Base board | LilyGO T-SIM7080G-S3, built as `esp32-s3-devkitc-1` |
 | Framework | PlatformIO, Arduino ESP32 core |
-| Firmware version | `0.2.0` in `firmware/src/version.h` |
+| Firmware version | `0.2.0` in `t-sim/firmware/src/version.h` |
 | Flash | 16 MB, `huge_app.csv` partition table |
 | PSRAM | Enabled, OPI/QIO memory configuration |
 | USB serial | COM5 default, 115200 baud monitor |
@@ -82,10 +82,10 @@ The T-SIM7080G-S3 is the base controller. The Grove Vision AI V2 is treated as a
 ## Repository Layout
 
 ```text
-firmware/                     PlatformIO firmware for the T-SIM7080G-S3 base
-firmware/src/                 Receiver firmware modules
-firmware/platformio.ini       ESP32-S3 build, upload, monitor, and library config
-firmware/huge_app.csv         16 MB flash partition table
+t-sim/firmware/               PlatformIO firmware for the T-SIM7080G-S3 base
+t-sim/firmware/src/           Receiver firmware modules
+t-sim/firmware/platformio.ini ESP32-S3 build, upload, monitor, and library config
+t-sim/firmware/huge_app.csv   16 MB flash partition table
 docs/                         Architecture, protocol, hardware, GNSS, SD, and bring-up notes
 docs/hardware/                Datasheets, pinouts, photos, and hardware references
 gv2/firmware/                 Local isolated Grove Vision AI V2 firmware, image tools, and active model zoo
@@ -581,7 +581,7 @@ The active GV2 model binaries are intentionally kept in the local GV2 firmware c
 
 ## Dependencies
 
-Base firmware dependencies are declared in `firmware/platformio.ini`:
+Base firmware dependencies are declared in `t-sim/firmware/platformio.ini`:
 
 - Arduino ESP32 core through PlatformIO `espressif32`.
 - TinyGSM from `https://github.com/vshymanskyy/TinyGSM.git`.
@@ -628,7 +628,7 @@ Third-party submodules and bundled tools may have their own licenses. Review tho
 
 ## Documentation Index
 
-- `firmware/README.md`: detailed receiver firmware behavior, pins, protocol, validation, and source-file map.
+- `t-sim/firmware/README.md`: detailed receiver firmware behavior, pins, protocol, validation, and source-file map.
 - `docs/architecture.md`: high-level hardware and firmware architecture.
 - `docs/receiver-post.md`: POST behavior.
 - `docs/sd-card-layout.md`: SD output notes.
@@ -639,7 +639,7 @@ Third-party submodules and bundled tools may have their own licenses. Review tho
 
 ## Development Notes
 
-- Keep base application changes in `firmware/`.
+- Keep base application changes in `t-sim/firmware/`.
 - Keep GV2 firmware and model work in `gv2/firmware/`.
 - Keep custom PCB and motor shield reference work in `external/t-sim-motor-shield/`.
 - Update this README and the relevant detailed docs when changing public behavior, binary protocols, default pins, SD file formats, model names, or license posture.

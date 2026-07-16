@@ -5,12 +5,12 @@ __pycache__/
 *.pyc
 
 # PlatformIO / firmware build output
-firmware/.pio/
-firmware/.vscode/
-firmware/.vscode/.browse.c_cpp.db*
-firmware/.vscode/c_cpp_properties.json
-firmware/.vscode/launch.json
-firmware/.vscode/ipch/
+t-sim/firmware/.pio/
+t-sim/firmware/.vscode/
+t-sim/firmware/.vscode/.browse.c_cpp.db*
+t-sim/firmware/.vscode/c_cpp_properties.json
+t-sim/firmware/.vscode/launch.json
+t-sim/firmware/.vscode/ipch/
 
 # Local serial/log/runtime output
 *.log
