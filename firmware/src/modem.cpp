@@ -429,7 +429,6 @@ static void reset_bearer_for_apn_probe(uint8_t attempt, const char *supplier, co
                   (unsigned)attempt,
                   supplier && supplier[0] ? supplier : "configured",
                   apn && apn[0] ? apn : "-");
-    modem.gprsDisconnect();
     deactivate_app_pdp_context();
     deactivate_pdp_context();
 }
@@ -833,7 +832,10 @@ static uint32_t remaining_ms(uint32_t start_ms, uint32_t timeout_ms)
     return elapsed >= timeout_ms ? 0 : timeout_ms - elapsed;
 }
 
-static bool activate_app_pdp_context_bounded(const char *apn, uint32_t timeout_ms)
+static bool activate_app_pdp_context_bounded(const char *apn,
+                                             uint32_t timeout_ms,
+                                             char *out_ip = nullptr,
+                                             size_t out_ip_len = 0)
 {
     if (!apn || !apn[0])
         return false;
@@ -879,7 +881,12 @@ static bool activate_app_pdp_context_bounded(const char *apn, uint32_t timeout_m
     if (left == 0)
         return false;
 
-    return wait_for_app_pdp_address(ip, sizeof(ip), left);
+    if (!wait_for_app_pdp_address(ip, sizeof(ip), left))
+        return false;
+
+    if (out_ip && out_ip_len > 0)
+        strlcpy(out_ip, ip, out_ip_len);
+    return true;
 }
 
 static void print_at_raw_response(const char *label, const char *cmd, uint32_t timeout_ms)
@@ -1086,43 +1093,51 @@ static bool modem_validate_ltem_attempt(const char *supplier,
         return false;
     }
 
-    Serial.printf("MODEM: TinyGSM data active before connect attempt=%u active=%s\n",
+    Serial.printf("MODEM: data active before connect attempt=%u active=%s\n",
                   (unsigned)attempt,
                   data_active ? "YES" : "NO");
 
     if (!data_active) {
-        Serial.printf("MODEM: TinyGSM gprsConnect begin attempt=%u supplier=%s apn=%s\n",
+        char app_ip[32] = {0};
+        Serial.printf("MODEM: bounded APP PDP connect begin attempt=%u supplier=%s apn=%s timeout_ms=%lu\n",
                       (unsigned)attempt,
                       supplier && supplier[0] ? supplier : "configured",
-                      apn);
-        if (!modem.gprsConnect(apn)) {
+                      apn,
+                      (unsigned long)network_timeout_ms);
+        if (!activate_app_pdp_context_bounded(apn, network_timeout_ms, app_ip, sizeof(app_ip))) {
             Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=app_pdp_activate_failed\n",
                           (unsigned)attempt,
                           supplier && supplier[0] ? supplier : "configured",
                           apn);
-            print_at_raw_response("APP PDP after gprsConnect fail", "+CNACT?", 3000);
+            print_at_raw_response("APP PDP after bounded connect fail", "+CNACT?", 3000);
             append_apn_probe_log("end", attempt, supplier, apn, "fail", "app_pdp_activate_failed");
             return false;
         }
-    }
 
-    IPAddress local_ip = modem.localIP();
-    char app_ip[32] = {0};
-    strlcpy(app_ip, local_ip.toString().c_str(), sizeof(app_ip));
-    Serial.printf("MODEM: LTE-M APN probe attached attempt=%u supplier=%s apn=%s local_ip=%s source=TinyGSM\n",
-                  (unsigned)attempt,
-                  supplier && supplier[0] ? supplier : "configured",
-                  apn,
-                  app_ip[0] ? app_ip : "-");
+        Serial.printf("MODEM: LTE-M APN probe attached attempt=%u supplier=%s apn=%s local_ip=%s source=APP_PDP\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn,
+                      app_ip[0] ? app_ip : "-");
 
-    if (!app_ip[0] || strcmp(app_ip, "0.0.0.0") == 0 || strcmp(app_ip, "0") == 0) {
-        Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=zero_local_ip\n",
+        if (!app_ip[0] || strcmp(app_ip, "0.0.0.0") == 0 || strcmp(app_ip, "0") == 0) {
+            Serial.printf("MODEM: LTE-M APN probe FAIL attempt=%u supplier=%s apn=%s reason=zero_local_ip\n",
                       (unsigned)attempt,
                       supplier && supplier[0] ? supplier : "configured",
                       apn);
-        print_at_raw_response("APP PDP after zero local IP", "+CNACT?", 3000);
-        append_apn_probe_log("end", attempt, supplier, apn, "fail", "zero_local_ip");
-        return false;
+            print_at_raw_response("APP PDP after zero local IP", "+CNACT?", 3000);
+            append_apn_probe_log("end", attempt, supplier, apn, "fail", "zero_local_ip");
+            return false;
+        }
+    } else {
+        IPAddress local_ip = modem.localIP();
+        char app_ip[32] = {0};
+        strlcpy(app_ip, local_ip.toString().c_str(), sizeof(app_ip));
+        Serial.printf("MODEM: LTE-M APN probe already attached attempt=%u supplier=%s apn=%s local_ip=%s source=TinyGSM\n",
+                      (unsigned)attempt,
+                      supplier && supplier[0] ? supplier : "configured",
+                      apn,
+                      app_ip[0] ? app_ip : "-");
     }
 
     if (!validate_http_egress) {
@@ -1534,7 +1549,12 @@ bool modem_upload_azure_blob_from_sd(const char *local_path,
                                      uint32_t timeout_ms,
                                      const char *content_type)
 {
-    return modem_upload_azure_blob_from_sd_impl(local_path, blob_name, apn, timeout_ms, 0, content_type);
+    return modem_upload_azure_blob_from_sd_impl(local_path,
+                                                blob_name,
+                                                apn,
+                                                timeout_ms,
+                                                timeout_ms,
+                                                content_type);
 }
 
 bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
