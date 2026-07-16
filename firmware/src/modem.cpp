@@ -55,6 +55,7 @@ static bool g_pmu_ready = false;
 static bool g_serial_ready = false;
 static bool g_modem_initialized = false;
 static constexpr const char *MODEM_HEALTH_LOG_PATH = "/health.log";
+static char g_modem_device_name[32] = "vst-base";
 
 static bool is_plausible_year(int year)
 {
@@ -216,6 +217,8 @@ static void append_apn_probe_log(const char *event,
     s += "{";
     append_json_string(s, "type", "modem_apn_probe");
     s += ",";
+    append_json_string(s, "device_name", g_modem_device_name);
+    s += ",";
     append_json_string(s, "event", event ? event : "");
     s += ",\"uptime_ms\":";
     s += (unsigned long)millis();
@@ -232,6 +235,14 @@ static void append_apn_probe_log(const char *event,
     s += "}\n";
 
     sdcard_append_log(MODEM_HEALTH_LOG_PATH, s);
+}
+
+void modem_set_device_name(const char *device_name)
+{
+    if (!device_name || !device_name[0])
+        strlcpy(g_modem_device_name, "vst-base", sizeof(g_modem_device_name));
+    else
+        strlcpy(g_modem_device_name, device_name, sizeof(g_modem_device_name));
 }
 
 static bool has_nonzero_position(const char *latitude, const char *longitude)
@@ -1306,7 +1317,8 @@ static bool modem_upload_azure_blob_from_sd_impl(const char *local_path,
                                                  const char *blob_name,
                                                  const char *apn,
                                                  uint32_t timeout_ms,
-                                                 uint32_t data_connect_timeout_ms)
+                                                 uint32_t data_connect_timeout_ms,
+                                                 const char *content_type)
 {
     if (!AZURE_BLOB_HOST[0] || !AZURE_BLOB_CONTAINER[0] || !AZURE_BLOB_SAS[0]) {
         Serial.println("AZURE: upload skipped; AZURE_BLOB_* secrets are not configured");
@@ -1384,7 +1396,9 @@ static bool modem_upload_azure_blob_from_sd_impl(const char *local_path,
     headers += "x-ms-version: 2020-10-02\r\n";
     headers += "Content-Length: ";
     headers += String(file_size);
-    headers += "\r\nContent-Type: image/jpeg\r\nConnection: close\r\n\r\n";
+    headers += "\r\nContent-Type: ";
+    headers += (content_type && content_type[0]) ? content_type : "application/octet-stream";
+    headers += "\r\nConnection: close\r\n\r\n";
 
     Serial.printf("AZURE: HTTP PUT path=/%s/%s?<sas-redacted>\n", AZURE_BLOB_CONTAINER, blob_name);
     Serial.printf("AZURE: connect host=%s port=443 method=TinyGSM_default_secure_client\n", AZURE_BLOB_HOST);
@@ -1476,9 +1490,10 @@ static bool modem_upload_azure_blob_from_sd_impl(const char *local_path,
 bool modem_upload_azure_blob_from_sd(const char *local_path,
                                      const char *blob_name,
                                      const char *apn,
-                                     uint32_t timeout_ms)
+                                     uint32_t timeout_ms,
+                                     const char *content_type)
 {
-    return modem_upload_azure_blob_from_sd_impl(local_path, blob_name, apn, timeout_ms, 0);
+    return modem_upload_azure_blob_from_sd_impl(local_path, blob_name, apn, timeout_ms, 0, content_type);
 }
 
 bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
@@ -1488,7 +1503,8 @@ bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
                                              bool wake_if_needed,
                                              uint32_t timeout_ms,
                                              bool power_down_after,
-                                             uint32_t data_connect_timeout_ms)
+                                             uint32_t data_connect_timeout_ms,
+                                             const char *content_type)
 {
     bool woke_for_upload = false;
     if (!g_serial_ready || !modem.testAT(1000)) {
@@ -1519,7 +1535,8 @@ bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
                                                   blob_name,
                                                   apn,
                                                   timeout_ms,
-                                                  data_connect_timeout_ms);
+                                                  data_connect_timeout_ms,
+                                                  content_type);
     if (woke_for_upload || power_down_after)
         modem_power_down_runtime(ok ? "runtime_azure_done" : "runtime_azure_failed");
     return ok;

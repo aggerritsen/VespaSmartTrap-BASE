@@ -15,6 +15,7 @@ static constexpr const char *POWER_LOG_PATH = "/power.log";
 
 static XPowersPMU PMU;
 static PowerConfig g_power_config;
+static char g_power_device_name[32] = "vst-base";
 static bool g_power_ready = false;
 static uint32_t g_last_log_ms = 0;
 static bool g_last_solar_sample_valid = false;
@@ -82,6 +83,8 @@ static String make_power_log_line(const PowerSnapshot &snapshot)
     s.reserve(640);
     s += "{";
     append_json_string(s, "timestamp", current_timestamp().c_str());
+    s += ",";
+    append_json_string(s, "device_name", g_power_device_name);
     s += ",\"uptime_ms\":";
     s += (unsigned long)snapshot.uptime_ms;
     s += ",\"battery\":{\"present\":";
@@ -123,6 +126,14 @@ static String make_power_log_line(const PowerSnapshot &snapshot)
     s += (unsigned)snapshot.charger_status;
     s += "}}\n";
     return s;
+}
+
+void power_set_device_name(const char *device_name)
+{
+    if (!device_name || !device_name[0])
+        strlcpy(g_power_device_name, "vst-base", sizeof(g_power_device_name));
+    else
+        strlcpy(g_power_device_name, device_name, sizeof(g_power_device_name));
 }
 
 bool power_init(const PowerConfig &config)

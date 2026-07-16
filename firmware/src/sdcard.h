@@ -50,6 +50,12 @@ struct WebConfig {
 struct LoggingConfig {
     char post_log[33] = "/post.log";
     char image_prefix[33] = "/frame_";
+    uint16_t rotation_interval_minutes = 60;
+    uint8_t retention_days = 7;
+    bool upload_enabled = true;
+    uint16_t upload_interval_minutes = 180;
+    uint8_t upload_max_files_per_run = 4;
+    uint8_t upload_min_battery_percent = 35;
 };
 
 struct FeaturesConfig {
@@ -119,6 +125,9 @@ struct AzureConfig {
     uint32_t cooldown_minutes = 15;
     uint32_t failure_cooldown_seconds = 120;
     uint16_t runtime_connect_timeout_seconds = 20;
+    char photos_prefix[49] = "photos";
+    char logs_prefix[49] = "logs";
+    bool log_post_test_enabled = false;
 };
 
 struct SmsConfig {
@@ -171,5 +180,8 @@ bool sdcard_begin_jpeg(uint32_t frame_id);
 bool sdcard_write_jpeg_chunk(const uint8_t *data, size_t len);
 bool sdcard_finish_jpeg();
 void sdcard_abort_jpeg();
+void sdcard_set_logging_policy(const LoggingConfig &logging);
 bool sdcard_append_log(const char *path, const String &text);
 bool sdcard_write_log(const char *path, const String &text);
+bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len);
+bool sdcard_remove_file(const char *path);

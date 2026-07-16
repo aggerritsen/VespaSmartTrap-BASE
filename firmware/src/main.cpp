@@ -39,6 +39,7 @@ struct PostResult {
 static PostResult g_post;
 static ModemGnssInfo g_gnss;
 static BaseConfig g_config;
+static uint32_t g_last_log_archive_upload_attempt_ms = 0;
 
 /* =========================================================
    UTIL
@@ -125,6 +126,278 @@ static String current_timestamp_iso()
         return String(buf);
 
     return String();
+}
+
+static void sanitize_blob_segment(const char *in, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return;
+
+    out[0] = '\0';
+    if (!in)
+        return;
+
+    size_t used = 0;
+    for (const char *p = in; *p && used + 1 < out_len; p++) {
+        char c = *p;
+        if ((c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_') {
+            out[used++] = c;
+        } else {
+            out[used++] = '_';
+        }
+    }
+    out[used] = '\0';
+}
+
+static String current_timestamp_for_filename()
+{
+    char buf[32];
+    if (format_current_time(buf, sizeof(buf), "%Y%m%d_%H%M%S"))
+        return String(buf);
+
+    snprintf(buf, sizeof(buf), "uptime_%lu", (unsigned long)millis());
+    return String(buf);
+}
+
+static bool run_log_upload_post_test()
+{
+    if (!g_config.azure.log_post_test_enabled) {
+        print_post_warn("log_upload_test", "disabled by config");
+        return false;
+    }
+    if (!g_config.logging.upload_enabled) {
+        print_post_warn("log_upload_test", "skipped; logging upload disabled");
+        return false;
+    }
+    if (g_config.modem.mode != 2 || !g_post.modem_ltem) {
+        print_post_warn("log_upload_test", "skipped; LTE-M unavailable");
+        return false;
+    }
+
+    String timestamp = current_timestamp_for_filename();
+    String local_path = "/log_upload_post_test.jsonl";
+    String body;
+    body.reserve(220);
+    body += "{\"type\":\"log_upload_post_test\",\"timestamp\":\"";
+    body += current_timestamp_iso().length() ? current_timestamp_iso() : timestamp;
+    body += "\",\"device_name\":\"";
+    body += g_config.device_name;
+    body += "\",\"result\":\"probe\"}\n";
+
+    if (!sdcard_write_log(local_path.c_str(), body)) {
+        print_post_line("log_upload_test", false, "test file write failed");
+        return false;
+    }
+
+    char device[40] = {0};
+    sanitize_blob_segment(g_config.device_name, device, sizeof(device));
+    if (!device[0])
+        strlcpy(device, "vst-base", sizeof(device));
+
+    const char *prefix = g_config.azure.logs_prefix;
+    while (prefix && *prefix == '/')
+        prefix++;
+    if (!prefix || !prefix[0])
+        prefix = "logs";
+
+    char blob_name[160];
+    snprintf(blob_name,
+             sizeof(blob_name),
+             "%s/%s/log_upload_post_test_%s.jsonl",
+             prefix,
+             device,
+             timestamp.c_str());
+
+    bool ok = modem_upload_azure_blob_from_sd(local_path.c_str(),
+                                              blob_name,
+                                              g_config.modem.apn,
+                                              (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
+                                              "application/x-ndjson");
+    print_post_line("log_upload_test", ok, ok ? blob_name : "upload failed");
+    return ok;
+}
+
+static const char *path_basename(const char *path)
+{
+    if (!path)
+        return "";
+    const char *last = strrchr(path, '/');
+    return last ? last + 1 : path;
+}
+
+static bool archive_day_from_path(const char *path, char *out, size_t out_len)
+{
+    if (!path || !out || out_len == 0)
+        return false;
+
+    out[0] = '\0';
+    const char *marker = strstr(path, "/log/archive/");
+    if (!marker)
+        return false;
+
+    marker += strlen("/log/archive/");
+    if (strlen(marker) < 8 || marker[8] != '/')
+        return false;
+
+    for (uint8_t i = 0; i < 8; i++) {
+        if (marker[i] < '0' || marker[i] > '9')
+            return false;
+    }
+
+    if (out_len < 9)
+        return false;
+
+    memcpy(out, marker, 8);
+    out[8] = '\0';
+    return true;
+}
+
+static void normalized_blob_prefix(const char *in, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return;
+
+    out[0] = '\0';
+    const char *p = in;
+    while (p && *p == '/')
+        p++;
+    if (!p || !p[0])
+        p = "logs";
+
+    strlcpy(out, p, out_len);
+    while (out[0]) {
+        size_t len = strlen(out);
+        if (len == 0 || out[len - 1] != '/')
+            break;
+        out[len - 1] = '\0';
+    }
+    if (!out[0])
+        strlcpy(out, "logs", out_len);
+}
+
+static bool build_log_archive_blob_name(const char *local_path, char *out, size_t out_len)
+{
+    if (!local_path || !out || out_len == 0)
+        return false;
+
+    char prefix[56] = {0};
+    char device[40] = {0};
+    char day[9] = {0};
+    normalized_blob_prefix(g_config.azure.logs_prefix, prefix, sizeof(prefix));
+    sanitize_blob_segment(g_config.device_name, device, sizeof(device));
+    if (!device[0])
+        strlcpy(device, "vst-base", sizeof(device));
+    if (!archive_day_from_path(local_path, day, sizeof(day)))
+        return false;
+
+    snprintf(out,
+             out_len,
+             "%s/%s/%s/%s",
+             prefix,
+             device,
+             day,
+             path_basename(local_path));
+    return out[0] != '\0';
+}
+
+static bool log_archive_upload_power_allowed()
+{
+    PowerSnapshot snapshot;
+    if (!power_read_snapshot(snapshot)) {
+        Serial.println("LOG_UPLOAD: skipped reason=power_snapshot_unavailable");
+        return false;
+    }
+
+    if (snapshot.mains_power_present)
+        return true;
+
+    uint8_t threshold = g_config.logging.upload_min_battery_percent;
+    if (snapshot.battery_present &&
+        snapshot.battery_percent >= 0 &&
+        snapshot.battery_percent < threshold) {
+        Serial.printf("LOG_UPLOAD: skipped reason=battery_low battery=%d min=%u mains_power=NO\n",
+                      snapshot.battery_percent,
+                      threshold);
+        return false;
+    }
+
+    return true;
+}
+
+static void maybe_upload_rotated_logs()
+{
+    if (!g_config.logging.upload_enabled)
+        return;
+    if (!g_post.system_time)
+        return;
+    if (!sdcard_available())
+        return;
+    if (g_config.modem.mode != 2 || !g_post.modem_ltem)
+        return;
+
+    uint32_t now_ms = millis();
+    uint32_t interval_ms = (uint32_t)g_config.logging.upload_interval_minutes * 60000UL;
+    if (interval_ms == 0)
+        interval_ms = (uint32_t)g_config.logging.rotation_interval_minutes * 60000UL;
+    if (interval_ms == 0)
+        interval_ms = 3600000UL;
+
+    if (g_last_log_archive_upload_attempt_ms == 0) {
+        if (now_ms < 60000UL)
+            return;
+    } else if ((uint32_t)(now_ms - g_last_log_archive_upload_attempt_ms) < interval_ms) {
+        return;
+    }
+    g_last_log_archive_upload_attempt_ms = now_ms;
+
+    if (!log_archive_upload_power_allowed())
+        return;
+
+    uint8_t max_files = g_config.logging.upload_max_files_per_run;
+    if (max_files == 0)
+        max_files = 1;
+
+    uint8_t uploaded = 0;
+    for (uint8_t i = 0; i < max_files; i++) {
+        char local_path[128] = {0};
+        if (!sdcard_find_next_log_archive(local_path, sizeof(local_path))) {
+            if (uploaded == 0)
+                Serial.println("LOG_UPLOAD: no archive files pending");
+            break;
+        }
+
+        char blob_name[176] = {0};
+        if (!build_log_archive_blob_name(local_path, blob_name, sizeof(blob_name))) {
+            Serial.printf("LOG_UPLOAD: skipped reason=bad_archive_path file=%s\n", local_path);
+            break;
+        }
+
+        Serial.printf("LOG_UPLOAD: begin file=%s blob=%s\n", local_path, blob_name);
+        bool ok = modem_upload_azure_blob_from_sd_runtime(local_path,
+                                                          blob_name,
+                                                          g_config.modem.apn,
+                                                          g_config.modem.operator_auto_select,
+                                                          true,
+                                                          (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
+                                                          true,
+                                                          (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
+                                                          "application/x-ndjson");
+        if (!ok) {
+            Serial.printf("LOG_UPLOAD: FAIL file=%s retry=later\n", local_path);
+            break;
+        }
+
+        bool removed = sdcard_remove_file(local_path);
+        Serial.printf("LOG_UPLOAD: PASS blob=%s local_delete=%s\n",
+                      blob_name,
+                      removed ? "OK" : "FAILED");
+        uploaded++;
+    }
+
+    Serial.printf("LOG_UPLOAD: done uploaded=%u max=%u\n", uploaded, max_files);
 }
 
 static String post_sms_probe_message()
@@ -297,7 +570,9 @@ static void enter_deep_sleep_until(uint32_t sleep_seconds, const char *reason = 
     Serial.printf("POWER: entering deep sleep for %lu seconds reason=%s\n",
                   (unsigned long)sleep_seconds,
                   reason);
-    sdcard_append_log("/power.log", String("{\"event\":\"deep_sleep_enter\",\"seconds\":") +
+    sdcard_append_log("/power.log", String("{\"event\":\"deep_sleep_enter\",\"device_name\":\"") +
+                                      String(g_config.device_name) +
+                                      String("\",\"seconds\":") +
                                       String((unsigned long)sleep_seconds) +
                                       String(",\"reason\":\"") +
                                       String(reason) +
@@ -401,7 +676,9 @@ static bool sleep_if_battery_too_low(const char *phase)
                   snapshot.mains_power_present ? "YES" : "NO",
                   (unsigned)snapshot.vbus_mv,
                   snapshot.solar_suspect ? "SUSPECT" : "NO");
-    sdcard_append_log("/power.log", String("{\"event\":\"low_battery_sleep\",\"phase\":\"") +
+    sdcard_append_log("/power.log", String("{\"event\":\"low_battery_sleep\",\"device_name\":\"") +
+                                      String(g_config.device_name) +
+                                      String("\",\"phase\":\"") +
                                       String(phase ? phase : "") +
                                       String("\",\"battery_percent\":") +
                                       String(snapshot.battery_percent) +
@@ -481,6 +758,30 @@ static String make_post_summary_text()
     s += "\n";
     s += "image_prefix=";
     s += g_config.logging.image_prefix;
+    s += "\n";
+    s += "log_rotation_interval_minutes=";
+    s += g_config.logging.rotation_interval_minutes;
+    s += "\n";
+    s += "log_retention_days=";
+    s += g_config.logging.retention_days;
+    s += "\n";
+    s += "log_upload=";
+    s += g_config.logging.upload_enabled ? "YES" : "NO";
+    s += " interval_minutes=";
+    s += g_config.logging.upload_interval_minutes;
+    s += " max_files_per_run=";
+    s += g_config.logging.upload_max_files_per_run;
+    s += " min_battery_percent=";
+    s += g_config.logging.upload_min_battery_percent;
+    s += "\n";
+    s += "azure_photos_prefix=";
+    s += g_config.azure.photos_prefix;
+    s += "\n";
+    s += "azure_logs_prefix=";
+    s += g_config.azure.logs_prefix;
+    s += "\n";
+    s += "azure_log_post_test=";
+    s += g_config.azure.log_post_test_enabled ? "YES" : "NO";
     s += "\n";
     s += "feature_gnss_probe=";
     s += g_config.features.gnss_probe ? "YES" : "NO";
@@ -784,6 +1085,13 @@ static void print_post_summary()
     Serial.printf("POST: device_name       [%s]\n", g_config.device_name);
     Serial.printf("POST: post_log          [%s]\n", g_config.logging.post_log);
     Serial.printf("POST: image_prefix      [%s]\n", g_config.logging.image_prefix);
+    Serial.printf("POST: log_rotation      [every=%u min retention=%u days upload=%s upload_every=%u min max_files=%u min_battery=%u%%]\n",
+                  g_config.logging.rotation_interval_minutes,
+                  g_config.logging.retention_days,
+                  g_config.logging.upload_enabled ? "YES" : "NO",
+                  g_config.logging.upload_interval_minutes,
+                  g_config.logging.upload_max_files_per_run,
+                  g_config.logging.upload_min_battery_percent);
     Serial.printf("POST: features          [gnss_probe=%s ack_frames=%s]\n",
                   g_config.features.gnss_probe ? "YES" : "NO",
                   g_config.features.ack_frames ? "YES" : "NO");
@@ -814,10 +1122,13 @@ static void print_post_summary()
     Serial.printf("POST: reboot_schedule  [cron=%s after_deep_sleep=%s]\n",
                   g_config.power.reboot_cron[0] ? g_config.power.reboot_cron : "-",
                   g_config.power.reboot_after_deep_sleep_wakeup ? "YES" : "NO");
-    Serial.printf("POST: azure_uploads    [runtime_only=YES cooldown=%lu min failure_cooldown=%lu sec runtime_connect_timeout=%u sec]\n",
+    Serial.printf("POST: azure_uploads    [image_runtime_only=YES cooldown=%lu min failure_cooldown=%lu sec runtime_connect_timeout=%u sec photos_prefix=%s logs_prefix=%s log_post_test=%s]\n",
                   (unsigned long)g_config.azure.cooldown_minutes,
                   (unsigned long)g_config.azure.failure_cooldown_seconds,
-                  g_config.azure.runtime_connect_timeout_seconds);
+                  g_config.azure.runtime_connect_timeout_seconds,
+                  g_config.azure.photos_prefix,
+                  g_config.azure.logs_prefix,
+                  g_config.azure.log_post_test_enabled ? "YES" : "NO");
     Serial.printf("POST: inference_filter  [class=%d positive>=%.3f doubtful>=%.3f upload_doubtful_to_azure=%s occurrence=%u window=%u sec]\n",
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
@@ -837,7 +1148,7 @@ static void print_post_summary()
             print_post_warn("http_egress", "skipped by config");
     }
     if (g_config.modem.mode == 2)
-        print_post_warn("azure_upload", "post probe disabled");
+        print_post_warn("azure_image_upload", "post probe disabled");
     print_post_line("modem_timestamp", g_post.modem_time, g_post.modem_time ? g_timestamp : "no valid network time");
     print_post_line("gnss_timestamp", g_post.gnss_time, g_post.gnss_time ? g_timestamp : "unavailable");
     print_post_line("system_time", g_post.system_time);
@@ -1057,7 +1368,9 @@ static bool cron_schedule_matches_now(const char *expr, const struct tm &tm)
 static void reboot_now(const char *reason)
 {
     Serial.printf("POWER: reboot requested reason=%s\n", reason ? reason : "unknown");
-    sdcard_append_log("/power.log", String("{\"event\":\"reboot\",\"reason\":\"") +
+    sdcard_append_log("/power.log", String("{\"event\":\"reboot\",\"device_name\":\"") +
+                                      String(g_config.device_name) +
+                                      String("\",\"reason\":\"") +
                                       String(reason ? reason : "unknown") +
                                       String("\"}\n"));
     Serial.flush();
@@ -1338,6 +1651,8 @@ static String make_health_log_line(uint32_t now,
     s += "{";
     append_json_string(s, "type", "health");
     s += ",";
+    append_json_string(s, "device_name", g_config.device_name);
+    s += ",";
     append_json_string(s, "timestamp", timestamp_iso.c_str());
     s += ",\"uptime_ms\":";
     s += (unsigned long)now;
@@ -1611,6 +1926,9 @@ void setup()
     print_post_line("sd_config", g_post.sd_config, g_post.sd_config ? "/config.json" : "unavailable");
     bool config_loaded = sdcard_load_config(g_config);
     print_post_line("config_load", config_loaded, config_loaded ? "loaded" : "defaults");
+    sdcard_set_logging_policy(g_config.logging);
+    power_set_device_name(g_config.device_name);
+    modem_set_device_name(g_config.device_name);
     reboot_after_deep_sleep_wakeup_if_configured();
 
     g_post.power = power_init(g_config.power);
@@ -1626,7 +1944,9 @@ void setup()
         Serial.printf("POST: modem init begin mode=%u\n", g_config.modem.mode);
         if (g_config.modem.mode == 1 && g_config.modem.apn_autodetect) {
             Serial.println("POST: APN autodetect skipped in modem mode=1; set modem.mode=2 for LTE-M/APN probing");
-            sdcard_append_log("/health.log", "{\"type\":\"modem_apn_probe\",\"event\":\"skipped\",\"result\":\"skipped\",\"detail\":\"mode_1_time_only_set_mode_2_for_apn_probe\"}\n");
+            sdcard_append_log("/health.log", String("{\"type\":\"modem_apn_probe\",\"device_name\":\"") +
+                                          String(g_config.device_name) +
+                                          String("\",\"event\":\"skipped\",\"result\":\"skipped\",\"detail\":\"mode_1_time_only_set_mode_2_for_apn_probe\"}\n"));
         }
     }
 
@@ -1662,7 +1982,7 @@ void setup()
         }
 
         if (g_config.modem.mode == 2)
-            print_post_warn("azure_upload", g_post.modem_ltem ? "post probe disabled" : "skipped; LTE-M unavailable");
+            print_post_warn("azure_image_upload", g_post.modem_ltem ? "post probe disabled" : "skipped; LTE-M unavailable");
 
         if (g_config.modem.mode != 0)
             send_post_sms_probe();
@@ -1696,6 +2016,8 @@ void setup()
                 print_post_warn("gnss_timestamp", g_gnss.utc_valid ? "GNSS UTC stale/no fix" : "trusted GNSS time unavailable");
             }
         }
+
+        run_log_upload_post_test();
 
         if (!g_config.modem.keep_alive_after_post) {
             modem_power_down_runtime("post_complete");
@@ -1741,4 +2063,5 @@ void loop()
     poll_status_led();
     if (diagnose_and_print_health())
         print_power_after_heartbeat();
+    maybe_upload_rotated_logs();
 }

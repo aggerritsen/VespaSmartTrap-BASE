@@ -628,7 +628,14 @@ static void make_blob_name_from_saved_path(const char *path, char *out, size_t o
     if (!name || !name[0])
         name = "frame.jpg";
 
-    snprintf(out, out_len, "saved_%s", name);
+    const BaseConfig *cfg = log_config;
+    const char *prefix = cfg ? cfg->azure.photos_prefix : "photos";
+    while (prefix && *prefix == '/')
+        prefix++;
+    if (!prefix || !prefix[0])
+        prefix = "photos";
+
+    snprintf(out, out_len, "%s/saved_%s", prefix, name);
 }
 
 static AzureUploadResult upload_runtime_azure_saved_image(const char *filename)

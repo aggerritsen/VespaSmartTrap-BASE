@@ -37,6 +37,26 @@ static constexpr const char *LEGACY_AZURE_QUEUE_PATH = "/azure_queue.log";
 static constexpr const char *LEGACY_AZURE_QUEUE_WORK_PATH = "/azure_queue.work";
 static constexpr const char *LEGACY_AZURE_QUEUE_TMP_PATH = "/azure_queue.tmp";
 
+struct RotatingLogState {
+    const char *path;
+    const char *name;
+    time_t slot_start;
+
+    RotatingLogState(const char *path_value, const char *name_value)
+        : path(path_value),
+          name(name_value),
+          slot_start(0)
+    {}
+};
+
+static LoggingConfig active_logging_config;
+static bool logging_policy_configured = false;
+static RotatingLogState rotating_logs[] = {
+    {"/health.log", "health"},
+    {"/power.log", "power"},
+    {"/frames.log", "frames"},
+};
+
 static void append_mac_suffix(char *value, size_t value_len)
 {
     if (!value || value_len == 0)
@@ -718,10 +738,39 @@ bool sdcard_load_config(BaseConfig &config)
     const char *image_prefix = logging["image_prefix"] | config.logging.image_prefix;
     strlcpy(config.logging.post_log, post_log, sizeof(config.logging.post_log));
     strlcpy(config.logging.image_prefix, image_prefix, sizeof(config.logging.image_prefix));
+    config.logging.rotation_interval_minutes =
+        logging["rotation_interval_minutes"] | config.logging.rotation_interval_minutes;
+    config.logging.retention_days =
+        logging["retention_days"] | config.logging.retention_days;
+    config.logging.upload_enabled =
+        logging["upload_enabled"] | config.logging.upload_enabled;
+    config.logging.upload_interval_minutes =
+        logging["upload_interval_minutes"] | config.logging.upload_interval_minutes;
+    config.logging.upload_max_files_per_run =
+        logging["upload_max_files_per_run"] | config.logging.upload_max_files_per_run;
+    config.logging.upload_min_battery_percent =
+        logging["upload_min_battery_percent"] | config.logging.upload_min_battery_percent;
     if (!config.logging.post_log[0] || config.logging.post_log[0] != '/')
         strlcpy(config.logging.post_log, "/post.log", sizeof(config.logging.post_log));
     if (!config.logging.image_prefix[0] || config.logging.image_prefix[0] != '/')
         strlcpy(config.logging.image_prefix, "/frame_", sizeof(config.logging.image_prefix));
+    if (config.logging.rotation_interval_minutes != 60 &&
+        config.logging.rotation_interval_minutes != 360 &&
+        config.logging.rotation_interval_minutes != 720 &&
+        config.logging.rotation_interval_minutes != 1440)
+        config.logging.rotation_interval_minutes = 60;
+    if (config.logging.retention_days == 0)
+        config.logging.retention_days = 7;
+    if (config.logging.retention_days > 90)
+        config.logging.retention_days = 90;
+    if (config.logging.upload_interval_minutes == 0)
+        config.logging.upload_interval_minutes = config.logging.rotation_interval_minutes;
+    if (config.logging.upload_max_files_per_run == 0)
+        config.logging.upload_max_files_per_run = 1;
+    if (config.logging.upload_max_files_per_run > 20)
+        config.logging.upload_max_files_per_run = 20;
+    if (config.logging.upload_min_battery_percent > 100)
+        config.logging.upload_min_battery_percent = 100;
     strlcpy(configured_image_prefix, config.logging.image_prefix, sizeof(configured_image_prefix));
 
     JsonObject features = doc["features"];
@@ -1016,10 +1065,20 @@ bool sdcard_load_config(BaseConfig &config)
         config.azure.failure_cooldown_seconds = 86400;
     config.azure.runtime_connect_timeout_seconds =
         azure["runtime_connect_timeout_seconds"] | config.azure.runtime_connect_timeout_seconds;
+    const char *photos_prefix = azure["photos_prefix"] | config.azure.photos_prefix;
+    const char *logs_prefix = azure["logs_prefix"] | config.azure.logs_prefix;
+    strlcpy(config.azure.photos_prefix, photos_prefix, sizeof(config.azure.photos_prefix));
+    strlcpy(config.azure.logs_prefix, logs_prefix, sizeof(config.azure.logs_prefix));
+    config.azure.log_post_test_enabled =
+        azure["log_post_test_enabled"] | config.azure.log_post_test_enabled;
     if (config.azure.runtime_connect_timeout_seconds < 5)
         config.azure.runtime_connect_timeout_seconds = 5;
     if (config.azure.runtime_connect_timeout_seconds > 60)
         config.azure.runtime_connect_timeout_seconds = 60;
+    if (!config.azure.photos_prefix[0])
+        strlcpy(config.azure.photos_prefix, "photos", sizeof(config.azure.photos_prefix));
+    if (!config.azure.logs_prefix[0])
+        strlcpy(config.azure.logs_prefix, "logs", sizeof(config.azure.logs_prefix));
 
     JsonObject sms = doc["sms"];
     config.sms.enabled = sms["enabled"] | config.sms.enabled;
@@ -1097,10 +1156,9 @@ bool sdcard_load_config(BaseConfig &config)
             config.azure.failure_cooldown_seconds = 1800;
         if (config.azure.runtime_connect_timeout_seconds > 20)
             config.azure.runtime_connect_timeout_seconds = 20;
-        config.sms.post_test_enabled = false;
     }
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u inference_occurrence_window_seconds=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_solar_auto_optimize=%s power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_low_battery_sleep_percent=%u power_low_battery_wake_interval_minutes=%u power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u inference_occurrence_window_seconds=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_solar_auto_optimize=%s power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_low_battery_sleep_percent=%u power_low_battery_wake_interval_minutes=%u power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u azure_photos_prefix=%s azure_logs_prefix=%s azure_log_post_test=%s sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -1136,6 +1194,9 @@ bool sdcard_load_config(BaseConfig &config)
                   (unsigned long)config.azure.cooldown_minutes,
                   (unsigned long)config.azure.failure_cooldown_seconds,
                   config.azure.runtime_connect_timeout_seconds,
+                  config.azure.photos_prefix,
+                  config.azure.logs_prefix,
+                  config.azure.log_post_test_enabled ? "YES" : "NO",
                   config.sms.enabled ? "YES" : "NO",
                   config.sms.post_test_enabled ? "YES" : "NO",
                   config.sms.runtime_settle_ms,
@@ -1177,10 +1238,397 @@ bool sdcard_load_config(BaseConfig &config)
     return true;
 }
 
+void sdcard_set_logging_policy(const LoggingConfig &logging)
+{
+    active_logging_config = logging;
+    logging_policy_configured = true;
+    for (RotatingLogState &state : rotating_logs)
+        state.slot_start = 0;
+}
+
+static bool is_rotating_log_path(const char *path, RotatingLogState **state_out)
+{
+    if (!path)
+        return false;
+
+    for (RotatingLogState &state : rotating_logs) {
+        if (strcmp(path, state.path) == 0) {
+            if (state_out)
+                *state_out = &state;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool current_time_for_rotation(time_t &now, struct tm &tm)
+{
+    now = time(nullptr);
+    if (now <= 1700000000)
+        return false;
+
+    return localtime_r(&now, &tm) != nullptr;
+}
+
+static time_t slot_start_for_time(time_t now, const struct tm &tm, uint16_t interval_minutes)
+{
+    uint32_t interval_seconds = (uint32_t)interval_minutes * 60UL;
+    if (interval_seconds == 0)
+        interval_seconds = 3600UL;
+
+    struct tm day_tm = tm;
+    day_tm.tm_hour = 0;
+    day_tm.tm_min = 0;
+    day_tm.tm_sec = 0;
+    time_t day_start = mktime(&day_tm);
+    if (day_start <= 0)
+        return now - ((uint32_t)now % interval_seconds);
+
+    uint32_t seconds_since_midnight = (uint32_t)(now - day_start);
+    return day_start + (seconds_since_midnight / interval_seconds) * interval_seconds;
+}
+
+static bool format_time_path_part(time_t value, const char *fmt, char *out, size_t out_len)
+{
+    if (!out || out_len == 0)
+        return false;
+
+    struct tm tm{};
+    if (!localtime_r(&value, &tm))
+        return false;
+
+    return strftime(out, out_len, fmt, &tm) > 0;
+}
+
+static bool ensure_dir(const char *path)
+{
+    if (!path || !path[0])
+        return false;
+    if (SD_MMC.exists(path))
+        return true;
+    return SD_MMC.mkdir(path);
+}
+
+static bool ensure_archive_day_dir(const char *day)
+{
+    if (!ensure_dir("/log"))
+        return false;
+    if (!ensure_dir("/log/archive"))
+        return false;
+
+    char path[40];
+    snprintf(path, sizeof(path), "/log/archive/%s", day);
+    return ensure_dir(path);
+}
+
+static bool remove_tree(const char *path)
+{
+    File node;
+    {
+        SdDriverLogSilencer quiet;
+        node = SD_MMC.open(path);
+    }
+    if (!node)
+        return false;
+
+    if (!node.isDirectory()) {
+        node.close();
+        return SD_MMC.remove(path);
+    }
+
+    File child = node.openNextFile();
+    while (child) {
+        char child_path[96];
+        const char *child_name = child.name();
+        if (child_name && child_name[0] == '/')
+            strlcpy(child_path, child_name, sizeof(child_path));
+        else
+            snprintf(child_path, sizeof(child_path), "%s/%s", path, child_name ? child_name : "");
+        bool child_dir = child.isDirectory();
+        child.close();
+        if (child_dir)
+            remove_tree(child_path);
+        else
+            SD_MMC.remove(child_path);
+        child = node.openNextFile();
+    }
+    node.close();
+    return SD_MMC.rmdir(path);
+}
+
+static void cleanup_old_archives(time_t now)
+{
+    if (!logging_policy_configured || active_logging_config.retention_days == 0)
+        return;
+    if (!SD_MMC.exists("/log/archive"))
+        return;
+
+    time_t cutoff = now - ((time_t)active_logging_config.retention_days * 86400L);
+    char cutoff_day[9] = {0};
+    if (!format_time_path_part(cutoff, "%Y%m%d", cutoff_day, sizeof(cutoff_day)))
+        return;
+
+    File root;
+    {
+        SdDriverLogSilencer quiet;
+        root = SD_MMC.open("/log/archive");
+    }
+    if (!root || !root.isDirectory()) {
+        if (root)
+            root.close();
+        return;
+    }
+
+    File entry = root.openNextFile();
+    while (entry) {
+        const char *name = entry.name();
+        bool dir = entry.isDirectory();
+        char day[16] = {0};
+        strlcpy(day, name ? name : "", sizeof(day));
+        entry.close();
+
+        if (dir && strlen(day) == 8 && strcmp(day, cutoff_day) < 0) {
+            char path[40];
+            snprintf(path, sizeof(path), "/log/archive/%s", day);
+            if (remove_tree(path))
+                Serial.printf("SD: log archive removed path=%s retention_days=%u\n",
+                              path,
+                              active_logging_config.retention_days);
+        }
+
+        entry = root.openNextFile();
+    }
+    root.close();
+}
+
+static bool rotate_log_if_due(const char *path)
+{
+    if (!logging_policy_configured)
+        return true;
+
+    RotatingLogState *state = nullptr;
+    if (!is_rotating_log_path(path, &state))
+        return true;
+
+    time_t now = 0;
+    struct tm now_tm{};
+    if (!current_time_for_rotation(now, now_tm))
+        return true;
+
+    uint16_t interval = active_logging_config.rotation_interval_minutes;
+    time_t slot_start = slot_start_for_time(now, now_tm, interval);
+    if (state->slot_start == 0) {
+        if (SD_MMC.exists(path)) {
+            File f;
+            {
+                SdDriverLogSilencer quiet;
+                f = SD_MMC.open(path, FILE_READ);
+            }
+            size_t size = 0;
+            if (f) {
+                size = f.size();
+                f.close();
+            }
+
+            if (size > 0) {
+                char day[9] = {0};
+                char stamp[16] = {0};
+                if (format_time_path_part(now, "%Y%m%d", day, sizeof(day)) &&
+                    format_time_path_part(now, "%Y%m%d_%H%M%S", stamp, sizeof(stamp)) &&
+                    ensure_archive_day_dir(day)) {
+                    char archive_path[96];
+                    snprintf(archive_path,
+                             sizeof(archive_path),
+                             "/log/archive/%s/%s_preboot_%s.jsonl",
+                             day,
+                             state->name,
+                             stamp);
+                    if (SD_MMC.exists(archive_path))
+                        SD_MMC.remove(archive_path);
+                    bool renamed = SD_MMC.rename(path, archive_path);
+                    Serial.printf("SD: log rotate %s path=%s archive=%s bytes=%u reason=preboot\n",
+                                  renamed ? "OK" : "FAILED",
+                                  path,
+                                  archive_path,
+                                  (unsigned)size);
+                    if (renamed)
+                        cleanup_old_archives(now);
+                }
+            }
+        }
+        state->slot_start = slot_start;
+        return true;
+    }
+    if (state->slot_start == slot_start)
+        return true;
+
+    if (!SD_MMC.exists(path)) {
+        state->slot_start = slot_start;
+        return true;
+    }
+
+    File f;
+    {
+        SdDriverLogSilencer quiet;
+        f = SD_MMC.open(path, FILE_READ);
+    }
+    if (!f) {
+        state->slot_start = slot_start;
+        return true;
+    }
+    size_t size = f.size();
+    f.close();
+    if (size == 0) {
+        SD_MMC.remove(path);
+        state->slot_start = slot_start;
+        return true;
+    }
+
+    char day[9] = {0};
+    char start[16] = {0};
+    char end[16] = {0};
+    time_t slot_end = slot_start;
+    if (!format_time_path_part(state->slot_start, "%Y%m%d", day, sizeof(day)) ||
+        !format_time_path_part(state->slot_start, "%Y%m%d_%H%M%S", start, sizeof(start)) ||
+        !format_time_path_part(slot_end, "%Y%m%d_%H%M%S", end, sizeof(end)) ||
+        !ensure_archive_day_dir(day)) {
+        return true;
+    }
+
+    char archive_path[96];
+    snprintf(archive_path,
+             sizeof(archive_path),
+             "/log/archive/%s/%s_%s_%s.jsonl",
+             day,
+             state->name,
+             start,
+             end);
+
+    if (SD_MMC.exists(archive_path))
+        SD_MMC.remove(archive_path);
+
+    bool renamed = SD_MMC.rename(path, archive_path);
+    Serial.printf("SD: log rotate %s path=%s archive=%s bytes=%u\n",
+                  renamed ? "OK" : "FAILED",
+                  path,
+                  archive_path,
+                  (unsigned)size);
+    if (renamed) {
+        state->slot_start = slot_start;
+        cleanup_old_archives(now);
+    }
+
+    return true;
+}
+
+static bool is_archive_jsonl_file(const char *name)
+{
+    if (!name || !name[0])
+        return false;
+
+    size_t len = strlen(name);
+    return len > 6 && strcmp(name + len - 6, ".jsonl") == 0;
+}
+
+static const char *sd_basename(const char *path)
+{
+    if (!path)
+        return "";
+    const char *last = strrchr(path, '/');
+    return last ? last + 1 : path;
+}
+
+bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len)
+{
+    if (!out_path || out_path_len == 0)
+        return false;
+    out_path[0] = '\0';
+
+    if (!sdcard_ensure_ready() || !SD_MMC.exists("/log/archive"))
+        return false;
+
+    char best_path[128] = {0};
+    char best_day[16] = {0};
+    char best_name[80] = {0};
+
+    File root;
+    {
+        SdDriverLogSilencer quiet;
+        root = SD_MMC.open("/log/archive");
+    }
+    if (!root || !root.isDirectory()) {
+        if (root)
+            root.close();
+        return false;
+    }
+
+    File day_entry = root.openNextFile();
+    while (day_entry) {
+        bool day_is_dir = day_entry.isDirectory();
+        char day[16] = {0};
+        strlcpy(day, sd_basename(day_entry.name()), sizeof(day));
+        day_entry.close();
+
+        if (day_is_dir && strlen(day) == 8) {
+            char day_path[40];
+            snprintf(day_path, sizeof(day_path), "/log/archive/%s", day);
+
+            File day_dir;
+            {
+                SdDriverLogSilencer quiet;
+                day_dir = SD_MMC.open(day_path);
+            }
+            if (day_dir && day_dir.isDirectory()) {
+                File file = day_dir.openNextFile();
+                while (file) {
+                    bool is_dir = file.isDirectory();
+                    char name[80] = {0};
+                    strlcpy(name, sd_basename(file.name()), sizeof(name));
+                    file.close();
+
+                    if (!is_dir && is_archive_jsonl_file(name)) {
+                        if (!best_path[0] ||
+                            strcmp(day, best_day) < 0 ||
+                            (strcmp(day, best_day) == 0 && strcmp(name, best_name) < 0)) {
+                            strlcpy(best_day, day, sizeof(best_day));
+                            strlcpy(best_name, name, sizeof(best_name));
+                            snprintf(best_path, sizeof(best_path), "%s/%s", day_path, name);
+                        }
+                    }
+
+                    file = day_dir.openNextFile();
+                }
+            }
+            if (day_dir)
+                day_dir.close();
+        }
+
+        day_entry = root.openNextFile();
+    }
+    root.close();
+
+    if (!best_path[0])
+        return false;
+
+    strlcpy(out_path, best_path, out_path_len);
+    return out_path[0] != '\0';
+}
+
+bool sdcard_remove_file(const char *path)
+{
+    if (!path || !path[0] || !sdcard_ensure_ready())
+        return false;
+    if (!SD_MMC.exists(path))
+        return true;
+    return SD_MMC.remove(path);
+}
+
 bool sdcard_append_log(const char *path, const String &text)
 {
     if (!path || !path[0] || !sdcard_ensure_ready())
         return false;
+
+    rotate_log_if_due(path);
 
     File f;
     {

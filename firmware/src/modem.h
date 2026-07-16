@@ -7,6 +7,7 @@
 
 // Returns true if PMU + modem AT are ready (or at least AT works).
 bool modem_init_early(bool operator_auto_select = false);
+void modem_set_device_name(const char *device_name);
 
 // Tries to obtain a *plausible* modem timestamp via AT+CCLK?
 // Output format: "YYYYMMDD_HHMMSS"
@@ -39,7 +40,8 @@ bool modem_test_http_egress(uint32_t timeout_ms = 15000);
 bool modem_upload_azure_blob_from_sd(const char *local_path,
                                      const char *blob_name,
                                      const char *apn = nullptr,
-                                     uint32_t timeout_ms = 20000);
+                                     uint32_t timeout_ms = 20000,
+                                     const char *content_type = "image/jpeg");
 bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
                                              const char *blob_name,
                                              const char *apn,
@@ -47,7 +49,8 @@ bool modem_upload_azure_blob_from_sd_runtime(const char *local_path,
                                              bool wake_if_needed,
                                              uint32_t timeout_ms = 60000,
                                              bool power_down_after = true,
-                                             uint32_t data_connect_timeout_ms = 20000);
+                                             uint32_t data_connect_timeout_ms = 20000,
+                                             const char *content_type = "image/jpeg");
 
 // Sends a text SMS through TinyGSM. The modem must already be initialized.
 bool modem_send_sms_text(const char *number, const char *message, uint32_t submit_timeout_ms = 30000);

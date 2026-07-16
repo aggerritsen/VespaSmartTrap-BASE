@@ -8,7 +8,13 @@
   },
   "logging": {
     "post_log": "/post.log",
-    "image_prefix": "/frame_"
+    "image_prefix": "/frame_",
+    "rotation_interval_minutes": 60,
+    "retention_days": 7,
+    "upload_enabled": true,
+    "upload_interval_minutes": 180,
+    "upload_max_files_per_run": 4,
+    "upload_min_battery_percent": 35
   },
   "features": {
     "gnss_probe": true,
@@ -56,6 +62,13 @@
         "direct_sms": false,
         "imsi_prefixes": ["23450", "23873"],
         "iccid_prefixes": ["894573"]
+      },
+      {
+        "supplier": "Wireless Logic Benelux",
+        "apn": "internet.m2m",
+        "direct_sms": true,
+        "imsi_prefixes": ["20408"],
+        "iccid_prefixes": []
       },
       {
         "supplier": "KPNThings",
@@ -130,7 +143,10 @@
   "azure": {
     "cooldown_minutes": 15,
     "failure_cooldown_seconds": 120,
-    "runtime_connect_timeout_seconds": 20
+    "runtime_connect_timeout_seconds": 20,
+    "photos_prefix": "photos",
+    "logs_prefix": "logs",
+    "log_post_test_enabled": true
   },
   "sms": {
     "enabled": false,

@@ -112,13 +112,14 @@ At startup the receiver:
 4. Validates LTE-M/APN when modem mode is `2`, using SIM identity profiles first and candidate probing as fallback.
 5. Attempts to obtain network time and set system time.
 6. Optionally sends a POST SMS probe when `sms.post_test_enabled` is true.
-7. Powers and probes GNSS, optionally using trusted GNSS UTC as a fallback time source.
-8. Powers the modem down after POST unless `modem.keep_alive_after_post` is true.
-9. Starts the WiFi web service when enabled.
-10. Initializes power telemetry and the stepper actuator.
-11. Runs a short status LED POST test on GPIO 3 / D0.
-12. Runs the optional stepper POST cycle when `stepper.post_test_enabled` is true.
-13. Reset-cycles GV2 power on GPIO 43, starts GV2 UART, writes `/post.log`, and enters receive mode.
+7. Optionally uploads a small POST log probe when `azure.log_post_test_enabled` is true.
+8. Powers and probes GNSS, optionally using trusted GNSS UTC as a fallback time source.
+9. Powers the modem down after POST unless `modem.keep_alive_after_post` is true.
+10. Starts the WiFi web service when enabled.
+11. Initializes power telemetry and the stepper actuator.
+12. Runs a short status LED POST test on GPIO 3 / D0.
+13. Runs the optional stepper POST cycle when `stepper.post_test_enabled` is true.
+14. Reset-cycles GV2 power on GPIO 43, starts GV2 UART, writes `/post.log`, and enters receive mode.
 
 ## UART Protocol
 
@@ -154,7 +155,7 @@ The receiver evaluates each valid JPEG frame against the configured inference fi
 
 When the positive threshold and occurrence count are reached inside the configured window, the firmware runs the configured stepper actuator cycle, flushes and resynchronizes the UART receive path after the blocking actuator movement, saves the triggering JPEG when the SD card is available, optionally sends SMS, and attempts runtime Azure upload. The occurrence counter resets after the actuator event.
 
-Doubtful frames do not trigger the stepper and do not send SMS. When enabled, they are saved and sent through the same runtime Azure upload path.
+Doubtful frames do not trigger the stepper and do not send SMS. When enabled, they are saved and sent through the same runtime Azure upload path. With `power.solar_auto_optimize=true`, doubtful-frame upload is disabled at runtime even if the loaded config sets `upload_doubtful_to_azure=true`; positive detections still use runtime photo upload.
 
 ## SD Card Files
 
@@ -172,6 +173,10 @@ The firmware creates or writes these files on the SD card:
 `/frames.log` includes device identity, firmware version, GNSS fields, inference state, bounding box, positive/doubtful filter result, CRC result, actuator result, SMS result, Azure result, cooldown status, and saved filename.
 
 The firmware removes legacy Azure queue files (`/azure_queue.log`, `/azure_queue.work`, `/azure_queue.tmp`) on SD mount. New firmware does not use an upload queue.
+
+Log rotation uses the same `logging` settings in VBUS and solar mode. `rotation_interval_minutes` accepts `60`, `360`, `720`, or `1440`, giving one shared rotation cadence for `health`, `power`, and `frames` logs. Closed log files are moved to `/log/archive/YYYYMMDD/` with timestamped names. Existing current logs found after boot are archived as `*_preboot_<timestamp>.jsonl` once valid time is available. Archive day folders older than `retention_days` are removed during rotation.
+
+`upload_interval_minutes`, `upload_max_files_per_run`, and `upload_min_battery_percent` control scheduled upload of rotated log archives. The firmware scans `/log/archive/YYYYMMDD/` for the oldest `.jsonl` files, uploads at most `upload_max_files_per_run` per cycle to the Azure `logs` prefix, and deletes each local archive only after a successful upload. Failed uploads remain on SD and are retried during the next cycle. The upload policy is intentionally separate from `power.solar_auto_optimize`; solar mode must not silently change log retention or upload cadence.
 
 ## Power Autonomy Analysis
 
@@ -206,7 +211,13 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
   },
   "logging": {
     "post_log": "/post.log",
-    "image_prefix": "/frame_"
+    "image_prefix": "/frame_",
+    "rotation_interval_minutes": 60,
+    "retention_days": 7,
+    "upload_enabled": true,
+    "upload_interval_minutes": 180,
+    "upload_max_files_per_run": 4,
+    "upload_min_battery_percent": 35
   },
   "features": {
     "gnss_probe": true,
@@ -239,6 +250,13 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
         "direct_sms": false,
         "imsi_prefixes": ["23450", "23873"],
         "iccid_prefixes": ["894573"]
+      },
+      {
+        "supplier": "Wireless Logic Benelux",
+        "apn": "internet.m2m",
+        "direct_sms": true,
+        "imsi_prefixes": ["20408"],
+        "iccid_prefixes": []
       },
       {
         "supplier": "KPNThings",
@@ -297,7 +315,10 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
   "azure": {
     "cooldown_minutes": 15,
     "failure_cooldown_seconds": 120,
-    "runtime_connect_timeout_seconds": 20
+    "runtime_connect_timeout_seconds": 20,
+    "photos_prefix": "photos",
+    "logs_prefix": "logs",
+    "log_post_test_enabled": true
   },
   "sms": {
     "enabled": false,
@@ -357,7 +378,10 @@ Solar auto-optimize forces these effective settings at runtime:
   "azure": {
     "cooldown_minutes": 60,
     "failure_cooldown_seconds": 1800,
-    "runtime_connect_timeout_seconds": 20
+    "runtime_connect_timeout_seconds": 20,
+    "photos_prefix": "photos",
+    "logs_prefix": "logs",
+    "log_post_test_enabled": true
   },
   "sms": {
     "post_test_enabled": false
@@ -415,7 +439,10 @@ Recommended Solar profile:
   "azure": {
     "cooldown_minutes": 60,
     "failure_cooldown_seconds": 1800,
-    "runtime_connect_timeout_seconds": 20
+    "runtime_connect_timeout_seconds": 20,
+    "photos_prefix": "photos",
+    "logs_prefix": "logs",
+    "log_post_test_enabled": true
   },
   "sms": {
     "enabled": false,
@@ -478,7 +505,10 @@ Recommended VBUS profile:
   "azure": {
     "cooldown_minutes": 15,
     "failure_cooldown_seconds": 120,
-    "runtime_connect_timeout_seconds": 20
+    "runtime_connect_timeout_seconds": 20,
+    "photos_prefix": "photos",
+    "logs_prefix": "logs",
+    "log_post_test_enabled": true
   },
   "web": {
     "mode": 2,
@@ -493,11 +523,13 @@ VBUS mode can keep the health LED and web AP enabled for field inspection. Keep 
 
 `device_name` is suffixed at runtime with the WiFi MAC suffix, matching the web SSID style, for example `VST-BASE-A62E94`. `web.mode` values are `0` for disabled, `1` for WiFi station mode, and `2` for access-point mode. `stepper.start_direction` accepts common clockwise and counter-clockwise forms such as `cw`, `clockwise`, `ccw`, and `anti-clockwise`.
 
-Azure upload is runtime-only. A saved positive or configured doubtful image is uploaded immediately when the Azure cooldown allows. If cooldown is active the image remains saved on SD but is not queued. If upload fails, the failure cooldown is applied and the image is not queued.
+Azure image upload is runtime-only. A saved positive or configured doubtful image is uploaded immediately when the Azure cooldown allows. If cooldown is active the image remains saved on SD but is not queued. If upload fails, the failure cooldown is applied and the image is not queued.
+
+Azure uploads use one configured container and separate blob prefixes inside it. Photos default to `photos/...`; the optional POST log-upload probe defaults to `logs/...`. Set `azure.log_post_test_enabled=true` to write and upload a small JSON Lines test file during POST after LTE-M validation and before the modem is powered down. Rotated log archives upload to `logs/<device_name>/<YYYYMMDD>/<filename>.jsonl` and are removed from SD after successful upload.
 
 SMS is runtime-only unless `sms.post_test_enabled` is explicitly true. `sms.enabled` is authoritative: recipients may be present while SMS remains disabled. SMS is skipped for providers whose selected SIM profile has `direct_sms=false`, such as Onomondo in the default profile set.
 
-The modem APN is selected from SIM identity first (`sim_profiles` by IMSI/ICCID prefixes), then by configured APN candidate probing. Known default profiles cover Onomondo, KPNThings, and ThingsData/Tele2 2G-4G.
+The modem APN is selected from SIM identity first (`sim_profiles` by IMSI/ICCID prefixes), then by configured APN candidate probing. Known default profiles cover Onomondo, Wireless Logic Benelux, KPNThings, and ThingsData/Tele2 2G-4G.
 
 `power.reboot_cron` uses a five-field cron-like schedule after valid system time is available. For example, `0 12 * * *` reboots daily at noon. Leave it empty to disable scheduled reboot.
 
