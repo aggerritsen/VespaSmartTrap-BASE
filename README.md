@@ -74,8 +74,8 @@ The T-SIM7080G-S3 is the base controller. The Grove Vision AI V2 is treated as a
 | Status output | Right LED / actuator-active signal on GPIO 3 / D0 |
 | Web service | HTTP port 80, endpoints `/`, `/state.json`, `/frame.jpg` |
 | Model target | Grove Vision AI V2 |
-| Current model path | `external/gv2-firmware/model_zoo/tflm_yolo11_od/` |
-| Current model file | `yolo11n_vespa_2026-02v1_allpxNULL_full_integer_quant_vela.tflite` |
+| Current model path | `gv2/firmware/model_zoo/tflm_yolo11_od/` |
+| Current model files | `gv2-yolo11n-vespa-2026-02v1.tflite`, `gv2-yolo11n-vespa-2026-05top.tflite` |
 | Model flash offset | `0xB7B000` |
 | Model class short names | Configurable, defaults: `amel`, `vcra`, `vesp`, `vvel` |
 
@@ -88,7 +88,7 @@ firmware/platformio.ini       ESP32-S3 build, upload, monitor, and library confi
 firmware/huge_app.csv         16 MB flash partition table
 docs/                         Architecture, protocol, hardware, GNSS, SD, and bring-up notes
 docs/hardware/                Datasheets, pinouts, photos, and hardware references
-external/gv2-firmware/        Submodule: Grove Vision AI V2 firmware fork and model zoo
+gv2/firmware/                 Local isolated Grove Vision AI V2 firmware, image tools, and active model zoo
 external/t-sim-motor-shield/  Submodule: custom PCB / motor shield reference
 tools/image-viewer/           Desktop random image viewer and sample images
 tools/receiver/               Receiver helper scripts
@@ -96,8 +96,8 @@ tools/Himax_AI_web_toolkit/   Local copy of the Himax web flashing toolkit
 tools/power_uptime_visual.py  Builds the power/autonomy CSV and matplotlib timeline
 data/power_uptime_dataset.csv Derived power/autonomy dataset from SD logs
 data/power_uptime_plot.png    Power, operating-state, and temperature graph
-build_gv2_image.ps1           GV2 firmware image build helper
-flash_gv2.ps1                 GV2 firmware and model flash helper
+gv2/build_gv2_image.ps1       GV2 firmware image build helper
+gv2/flash_gv2.ps1             GV2 firmware and model flash helper
 ```
 
 Submodules are intentionally kept under `external/` to make ownership and licensing boundaries clear.
@@ -562,22 +562,22 @@ git submodule update --init --recursive
 Build the GV2 firmware image:
 
 ```powershell
-.\build_gv2_image.ps1
+.\gv2\build_gv2_image.ps1
 ```
 
 Flash the GV2 firmware image and model:
 
 ```powershell
-.\flash_gv2.ps1 -Port COM7
+.\gv2\flash_gv2.ps1 -Port COM7
 ```
 
-The flash helper uses `external/gv2-firmware/xmodem/xmodem_send.py` and expects the generated image at:
+The flash helper uses `gv2/firmware/xmodem/xmodem_send.py` and expects the generated image at:
 
 ```text
-external/gv2-firmware/we2_image_gen_local/output_case1_sec_wlcsp/output.img
+gv2/firmware/we2_image_gen_local/output_case1_sec_wlcsp/output.img
 ```
 
-Large model binaries should remain in the GV2 firmware submodule unless they are intentionally copied into this repository for a release package.
+The active GV2 model binaries are intentionally kept in the local GV2 firmware copy for reproducible release builds.
 
 ## Dependencies
 
@@ -589,14 +589,13 @@ Base firmware dependencies are declared in `firmware/platformio.ini`:
 - ArduinoJson `^7.0.0`.
 - ESP32 Arduino built-ins such as `SD_MMC`, `WiFi`, and `WebServer`.
 
-GV2 firmware dependencies are managed inside the `external/gv2-firmware` submodule.
+GV2 firmware dependencies are isolated inside `gv2/firmware`.
 
 ## External Repositories
 
 ```text
-external/gv2-firmware
-  url:    https://github.com/marcory-hub/Seeed_Grove_Vision_AI_Module_V2.git
-  branch: yolo11-vespa
+gv2/firmware
+  source: isolated local copy of the Grove Vision AI V2 firmware fork
 
 external/t-sim-motor-shield
   url:    https://github.com/aggerritsen/T-SIMMotorShield.git
@@ -641,6 +640,6 @@ Third-party submodules and bundled tools may have their own licenses. Review tho
 ## Development Notes
 
 - Keep base application changes in `firmware/`.
-- Keep GV2 firmware and model work in `external/gv2-firmware/`.
+- Keep GV2 firmware and model work in `gv2/firmware/`.
 - Keep custom PCB and motor shield reference work in `external/t-sim-motor-shield/`.
 - Update this README and the relevant detailed docs when changing public behavior, binary protocols, default pins, SD file formats, model names, or license posture.

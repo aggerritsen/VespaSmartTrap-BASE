@@ -28,3 +28,10 @@ data/sample-images/**
 !data/sample-images/.gitkeep
 
 create_github_repo.ps1
+
+# GV2 local firmware generated output
+gv2/firmware/EPII_CM55M_APP_S/obj_*/
+gv2/firmware/we2_image_gen_local/output_case1_sec_wlcsp/
+gv2/firmware/we2_image_gen_local/*.log
+gv2/firmware/we2_image_gen_local/**/*.log
+gv2/firmware/model_zoo/tflm_yolo11_od/yolo11n_vespa_*.tflite
