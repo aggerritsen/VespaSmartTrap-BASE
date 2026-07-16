@@ -492,6 +492,46 @@ static bool read_sim_identity_value(const char *cmd, const char *label, String &
     return false;
 }
 
+static bool wait_for_sim_ready_for_identity(uint32_t timeout_ms)
+{
+    uint32_t start = millis();
+    String line;
+    while (millis() - start < timeout_ms) {
+        if (read_at_prefixed_line("+CPIN?", "+CPIN:", line, 1000)) {
+            line.trim();
+            line.replace(" ", "");
+            Serial.printf("MODEM: SIM identity CPIN=%s\n", line.c_str());
+            if (line.indexOf("READY") >= 0)
+                return true;
+        }
+        delay(250);
+    }
+
+    Serial.println("MODEM: SIM identity CPIN not ready before identity query");
+    return false;
+}
+
+static bool read_sim_identity_value_retry(const char *cmd,
+                                          const char *label,
+                                          String &value,
+                                          uint8_t attempts,
+                                          uint32_t timeout_ms)
+{
+    for (uint8_t attempt = 1; attempt <= attempts; attempt++) {
+        if (read_sim_identity_value(cmd, label, value, timeout_ms))
+            return true;
+
+        if (attempt < attempts) {
+            Serial.printf("MODEM: SIM identity %s retry attempt=%u/%u\n",
+                          label,
+                          (unsigned)(attempt + 1),
+                          (unsigned)attempts);
+            delay(500);
+        }
+    }
+    return false;
+}
+
 template <size_t N>
 static bool starts_with_config_prefixes(const String &value, const char (&prefixes)[ModemConfig::MAX_SIM_PREFIXES][N], uint8_t prefix_count)
 {
@@ -536,8 +576,9 @@ static bool prefer_apn_candidate_by_sim_identity(ModemConfig &config)
 {
     String imsi;
     String iccid;
-    bool have_imsi = read_sim_identity_value("+CIMI", "IMSI", imsi, 3000);
-    bool have_iccid = read_sim_identity_value("+CCID", "ICCID", iccid, 3000);
+    wait_for_sim_ready_for_identity(5000);
+    bool have_imsi = read_sim_identity_value_retry("+CIMI", "IMSI", imsi, 3, 3000);
+    bool have_iccid = read_sim_identity_value_retry("+CCID", "ICCID", iccid, 3, 3000);
 
     Serial.printf("MODEM: SIM identity imsi=%s iccid=%s\n",
                   have_imsi ? imsi.c_str() : "-",
