@@ -1,6 +1,6 @@
 param(
-    [string]$UploadPort = "COM5",
-    [string]$MonitorPort = "COM5"
+    [string]$UploadPort = "COM4",
+    [string]$MonitorPort = "COM4"
 )
 
 pio run -t upload --upload-port $UploadPort
