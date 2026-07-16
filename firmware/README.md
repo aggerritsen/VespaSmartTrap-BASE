@@ -250,7 +250,7 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 }
 ```
 
-`health.led` is `1` to blink the status LED with the health state, or `0` to keep that LED off.
+`health.led` is `1` to blink the status LED with the health state while USB/VBUS power is present, or `0` to keep that runtime health blink off. The same status LED is driven on while the configured actuator cycle is running in any power mode.
 
 `deep_sleep` is a mode value:
 

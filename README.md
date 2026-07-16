@@ -451,7 +451,7 @@ Recommended Solar profile:
 }
 ```
 
-In this profile GNSS is sampled once during boot with `AT+CGNSPWR=1`, the resulting trusted location/time is kept in memory and logs, and the modem is powered down after POST. Runtime Azure/SMS paths wake LTE only for the transfer window and power it down again. `power.solar_auto_optimize` does not override `health.led`; when USB/VBUS power is present, the status LED is held on.
+In this profile GNSS is sampled once during boot with `AT+CGNSPWR=1`, the resulting trusted location/time is kept in memory and logs, and the modem is powered down after POST. Runtime Azure/SMS paths wake LTE only for the transfer window and power it down again. `power.solar_auto_optimize` does not override `health.led`; health-status blinking runs only when `health.led=1` and USB/VBUS power is present. The status LED is also driven on while an actuator cycle is running in any power mode.
 
 The measured solar logs support stopping at `18:00`: it avoids evening discharge and preserves battery for the next boot. Starting at `08:00` is practical, but `09:00` or `10:00` is safer for maximum autonomy. For a harsher winter or cloudy profile, use `deep_sleep_start_hour=17` and `deep_sleep_end_hour=10`.
 

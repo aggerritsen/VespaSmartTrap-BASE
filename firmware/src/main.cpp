@@ -1885,15 +1885,7 @@ static void poll_status_led()
         last_power_check_ms = now;
     }
 
-    if (usb_power_present) {
-        if (!led_on) {
-            led_on = true;
-            stepper_set_status_led(true);
-        }
-        return;
-    }
-
-    if (g_config.health.led == 0) {
+    if (g_config.health.led == 0 || !usb_power_present) {
         if (led_on) {
             led_on = false;
             stepper_set_status_led(false);
