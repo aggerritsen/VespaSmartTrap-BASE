@@ -9,14 +9,14 @@ The firmware receives binary inference state and JPEG frames from the Grove Visi
 ```text
 Grove Vision AI V2 stick-on module
         |
-        | UART2, 921600 baud, custom PCB
+        | T-SIM Serial2, 921600 baud, custom PCB
         v
 T-SIM7080G-S3 base firmware
         |
         +-- SIM7080 modem time
         +-- SIM7080 GNSS probe
         +-- SD-MMC image and POST logging
-        +-- WiFi HTTP image and inference view
+        +-- Optional WiFi HTTP image and inference view
         +-- TB6612FNG stepper actuator output
         +-- USB serial POST/heartbeat monitor
 ```
@@ -71,7 +71,7 @@ On startup, `setup()` performs:
 11. Initializes power telemetry.
 12. Initializes the TB6612FNG stepper output.
 13. Runs one stepper POST test cycle: configured `start_direction`, waits `reverse_wait_ms`, configured return rotation.
-14. Initializes UART2 for the GV2 link after the blocking POST test, so stale GV2 bytes cannot accumulate in the UART buffer during actuator movement.
+14. Initializes `Serial2` for the GV2 link after the blocking POST test, so stale GV2 bytes cannot accumulate in the UART buffer during actuator movement.
 15. Writes `/post.log` to the SD card when the card is available.
 16. Prints a POST summary.
 17. Enters receive mode.
@@ -132,11 +132,12 @@ The firmware writes:
 /post.log
 /frames.log
 /power.log
-/azure_queue.log
-/20260504_163530_000123.jpg
+/health.log
+/log/archive/<YYYYMMDD>/*.jsonl
+/vvel_0.859_20260716_225523_000004.jpg
 ```
 
-`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `src/version.h`. `/frames.log` and `/power.log` are appended as JSON Lines. `/azure_queue.log` stores saved-image upload candidates until the next POST upload window, then is cleared after the configured drain pass. JPEG filenames use the known system timestamp plus a local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
+`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `firmware/src/version.h`. `/frames.log`, `/health.log`, and `/power.log` are appended as JSON Lines and rotated into `/log/archive/<YYYYMMDD>/` according to the logging policy. JPEG filenames include the configured class short name, confidence, known system timestamp, and local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
 
 The repository includes `config.example.json` as a clean, human-readable baseline for validating SD card configs. It intentionally contains no comment helper fields and no legacy GV2 reset settings.
 
@@ -147,16 +148,20 @@ The stepper settings currently used are:
 ```json
 {
   "stepper": {
-    "speed_steps_per_second": 200,
+    "speed_steps_per_second": 400,
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
     "reverse_wait_ms": 1000,
-    "start_direction": "clockwise"
+    "start_direction": "cw",
+    "post_test_enabled": true
   },
   "inference": {
-    "confidence_threshold": 0.0,
-    "detected_class": -1,
-    "occurrence": 1
+    "confidence_threshold": 0.80,
+    "doubtful_confidence_threshold": 0.70,
+    "upload_doubtful_to_azure": true,
+    "detected_class": 3,
+    "occurrence": 3,
+    "occurrence_window_seconds": 30
   }
 }
 ```
@@ -173,7 +178,7 @@ UART pins can also be changed without rebuilding:
 }
 ```
 
-GV2 power switching is controlled at build time with `GV2_POWER_GPIO_CFG`, defaulting to GPIO 43 in `platformio.ini`. The pin is driven HIGH during boot/wake before the GV2 UART starts, and driven LOW immediately before deep sleep after the UART is stopped and its RX/TX pins are set to input/high-Z.
+GV2 power switching is controlled at build time with `GV2_POWER_GPIO_CFG`, defaulting to GPIO 43 in `firmware/platformio.ini`. The pin is driven HIGH during boot/wake before the GV2 UART starts, and driven LOW immediately before deep sleep after the UART is stopped and its RX/TX pins are set to input/high-Z.
 
 The modem mode controls how much of the SIM7080 is required for health:
 
@@ -210,7 +215,9 @@ Set `apn_test_all` to `true` during supplier comparison tests to continue throug
 
 For SIM supplier testing, use a longer `time.network_timeout_seconds` value such as `60` so roaming SIMs have enough time to leave `searching` registration states like `+CEREG: 2,2` before APN attach is declared failed.
 
-When `azure.max_uploads_per_boot` is greater than `0`, a detection-matched GV2 JPEG that is successfully saved to the SD card is queued for Azure Blob Storage upload using the credentials compiled in `config_secrets.h`. Runtime upload is deliberately deferred because GV2 continuously streams UART data and SIM7080 TLS connect can block for a long time. The queue is stored in `/azure_queue.log`; during the next POST, before GV2 UART starts, the firmware uploads at most `azure.max_uploads_per_boot` queued files and then clears the whole queue log. Failed entries and entries beyond the configured limit are intentionally discarded when the log is cleared. Set `azure.max_uploads_per_boot` to `0` to disable both runtime queueing and boot-time queued uploads.
+When a positive detection match is saved to SD, the firmware can immediately upload that saved JPEG to Azure Blob Storage using the credentials compiled in `firmware/src/config_secrets.h`. During the upload it pauses the GV2 UART, wakes or reconnects the SIM7080 data bearer as needed, performs an HTTPS PUT, then resumes GV2 UART reception and applies `azure.cooldown_minutes`. Failed uploads apply `azure.failure_cooldown_seconds`. Set `azure.cooldown_minutes` high enough to avoid repeated modem wake/upload cycles during dense detections.
+
+Doubtful frames, with confidence between `inference.doubtful_confidence_threshold` and `inference.confidence_threshold`, can also be saved and uploaded when `inference.upload_doubtful_to_azure` is true. They do not trigger the actuator unless they also satisfy the positive detection filter and occurrence count.
 
 `time.allow_gnss_fallback=true` lets mode `1` or `2` try GNSS time when modem network time is unavailable. GNSS time is only trusted from a valid GNSS position fix or from a plausible UTC value that advances during the probe.
 
@@ -245,7 +252,12 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
     "led": 1
   },
   "azure": {
-    "max_uploads_per_boot": 3
+    "cooldown_minutes": 15,
+    "failure_cooldown_seconds": 120,
+    "runtime_connect_timeout_seconds": 20,
+    "photos_prefix": "photos",
+    "logs_prefix": "logs",
+    "log_post_test_enabled": true
   }
 }
 ```
@@ -260,13 +272,13 @@ Power telemetry is logged to `/power.log`. The interval is configured in seconds
 | `1` | Sleep during the configured local-time window |
 | `2` | Sleep during the configured local-time window only when running from battery |
 
-Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, stops the GV2 UART, drives the future GV2 power-control signal on GPIO 43 LOW, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup. On the current hardware GPIO 43 does not physically power-cycle GV2.
+Mode `2` requires the PMU to report that a battery is present, the battery is discharging, and no external VBUS input is detected. This is intended for overnight saving while still keeping the unit awake when 5V or solar input is available. The default window is `18:00-06:00`, so after a valid modem or GNSS time sync, a unit booting during the night can go back to sleep immediately when the mode allows it. Before sleeping, the firmware logs a `deep_sleep_enter` event to `/power.log`, stops the GV2 UART, drives the GV2 power-control signal on GPIO 43 LOW, shuts down GNSS/modem rails where possible, and arms the ESP32 timer wakeup.
 
 Low-battery protection is independent of the night window. When a battery is present, no mains/VBUS input is detected, and `battery_percent` is less than or equal to `power.low_battery_sleep_percent`, the firmware enters deep sleep for `power.low_battery_wake_interval_minutes`. This check runs immediately after SD config and PMU init, before modem, web, stepper, or GV2 startup work, and it also runs during normal runtime. The default policy is to sleep at `10%` or lower and wake every `60` minutes to check whether solar charging has recovered the battery enough to continue. If the unit is already inside the programmed sleep window, or if the next low-battery check would land inside that window, the sleep is extended to the configured wake hour instead of doing hourly wakeups overnight.
 
 `power.reboot_cron` is a five-field cron-like schedule checked once per loop minute after valid system time is available. It supports `*`, single values, comma lists, ranges, and `*/step`. For example, `"0 12 * * *"` reboots daily at noon. Leave it empty to disable scheduled reboot. `power.reboot_after_deep_sleep_wakeup=true` performs one immediate restart after waking from a firmware-entered deep sleep, then clears the RTC marker to avoid a reboot loop.
 
-`azure.max_uploads_per_boot` is the single Azure upload switch and limit. `0` disables runtime queueing and boot-time queued uploads. Any value from `1` to `20` queues saved detection images and uploads at most that many during the next POST upload window. Whenever the POST drain pass runs, `/azure_queue.log` is cleared completely afterward, including failed entries and entries beyond the configured upload limit.
+Rotated log uploads are controlled separately by `logging.upload_enabled`, `logging.upload_interval_minutes`, `logging.upload_max_files_per_run`, and `logging.upload_min_battery_percent`. They use `azure.logs_prefix` and delete local archive files after a successful upload.
 
 During POST, missing `/config.json` fields are added back to the SD card from `config.example.json` without overwriting existing values. Existing values and extra user fields are preserved.
 
@@ -291,20 +303,20 @@ cd firmware
 
 | File | Responsibility |
 | --- | --- |
-| `src/main.cpp` | POST reporting, setup orchestration, heartbeat |
-| `src/modem.cpp` | AXP2101 rails, SIM7080 AT readiness, network time, GNSS probe |
-| `src/modem.h` | Modem API and GNSS data structure |
-| `src/sdcard.cpp` | SD-MMC custom pin setup, `/config.json`, `/post.log`, JPEG writing |
-| `src/sdcard.h` | SD card API |
-| `src/stepper.cpp` | TB6612FNG full-step actuator drive using config speed/rotation |
-| `src/stepper.h` | Stepper API |
-| `src/uart.cpp` | GV2 power control, Serial2 binary `VSTS`/`VSTJ` receiver, and JPEG streaming |
-| `src/uart.h` | GV2 power/UART API and receive statistics |
-| `src/web.cpp` | WiFi HTTP service serving latest JPEG, overlay page, and inference JSON |
-| `src/web.h` | Web service API and published frame metadata |
-| `src/version.h` | Software name and version used in POST and frame logs |
-| `platformio.ini` | ESP32-S3 build, serial ports, PSRAM, 16 MB flash, dependencies |
-| `huge_app.csv` | Partition table |
+| `firmware/src/main.cpp` | POST reporting, setup orchestration, heartbeat |
+| `firmware/src/modem.cpp` | AXP2101 rails, SIM7080 AT readiness, network time, GNSS probe |
+| `firmware/src/modem.h` | Modem API and GNSS data structure |
+| `firmware/src/sdcard.cpp` | SD-MMC custom pin setup, `/config.json`, `/post.log`, JPEG writing |
+| `firmware/src/sdcard.h` | SD card API |
+| `firmware/src/stepper.cpp` | TB6612FNG full-step actuator drive using config speed/rotation |
+| `firmware/src/stepper.h` | Stepper API |
+| `firmware/src/uart.cpp` | GV2 power control, Serial2 binary `VSTS`/`VSTJ` receiver, and JPEG streaming |
+| `firmware/src/uart.h` | GV2 power/UART API and receive statistics |
+| `firmware/src/web.cpp` | WiFi HTTP service serving latest JPEG, overlay page, and inference JSON |
+| `firmware/src/web.h` | Web service API and published frame metadata |
+| `firmware/src/version.h` | Software name and version used in POST and frame logs |
+| `firmware/platformio.ini` | ESP32-S3 build, serial ports, PSRAM, 16 MB flash, dependencies |
+| `firmware/huge_app.csv` | Partition table |
 
 ## Dependencies
 
