@@ -1141,7 +1141,6 @@ bool sdcard_load_config(BaseConfig &config)
         config.modem.apn_test_all = false;
         config.modem.validate_http_egress = false;
         config.web.mode = 0;
-        config.health.led = 0;
         config.inference.upload_doubtful_to_azure = false;
         config.power.deep_sleep = 2;
         config.power.deep_sleep_start_hour = 18;

@@ -23,7 +23,7 @@ The current base firmware provides the following operational features:
 - WiFi web view in access-point or station mode, serving the latest verified frame and inference metadata over HTTP.
 - JSON Lines frame logging with timestamp, GNSS data, inference result, bounding box, CRC status, actuator result, SMS/Azure result, saved filename, and firmware identity.
 - Power telemetry logging to `/power.log` at a configurable interval.
-- Solar auto-optimize mode that forces low-power runtime behavior from config: no WiFi, health LED off, GNSS sampled once during boot, modem powered down after POST and runtime uploads, longer sleep protection, and reduced optional network checks.
+- Solar auto-optimize mode that forces low-power runtime behavior from config: no WiFi, GNSS sampled once during boot, modem powered down after POST and runtime uploads, longer sleep protection, and reduced optional network checks.
 - GV2 power control on the custom PCB: power down before deep sleep, power up after wake, and a short reset cycle before UART receive starts.
 - Helper scripts for building and flashing the Grove Vision AI V2 firmware image and model.
 - [VSTtool](https://vsttool.org) support for flashing firmware to the MCUs used in the project.
@@ -339,7 +339,7 @@ Configuration is read from `/config.json` on the SD card. If it does not exist, 
 }
 ```
 
-The default file deliberately keeps ordinary VBUS-friendly values such as `web.mode=2`, `health.led=1`, and `inference.upload_doubtful_to_azure=true`, but `power.solar_auto_optimize` is `true` by default. On boot, that flag converts the loaded configuration to the lower-power effective runtime settings listed below. Set `power.solar_auto_optimize=false` to use the explicit values as-is, for example in VBUS/debug mode.
+The default file deliberately keeps ordinary VBUS-friendly values such as `web.mode=2`, `health.led=1`, and `inference.upload_doubtful_to_azure=true`, but `power.solar_auto_optimize` is `true` by default. On boot, that flag converts some loaded configuration values to the lower-power effective runtime settings listed below. Set `power.solar_auto_optimize=false` to use the explicit values as-is, for example in VBUS/debug mode.
 
 ### Power Profiles
 
@@ -371,9 +371,6 @@ Solar auto-optimize forces these effective settings at runtime:
     "deep_sleep_end_hour": 8,
     "low_battery_sleep_percent": 25,
     "low_battery_wake_interval_minutes": 120
-  },
-  "health": {
-    "led": 0
   },
   "azure": {
     "cooldown_minutes": 60,
@@ -434,7 +431,7 @@ Recommended Solar profile:
     "reboot_after_deep_sleep_wakeup": false
   },
   "health": {
-    "led": 0
+    "led": 1
   },
   "azure": {
     "cooldown_minutes": 60,
@@ -454,7 +451,7 @@ Recommended Solar profile:
 }
 ```
 
-In this profile GNSS is sampled once during boot with `AT+CGNSPWR=1`, the resulting trusted location/time is kept in memory and logs, and the modem is powered down after POST. Runtime Azure/SMS paths wake LTE only for the transfer window and power it down again. The health LED is off to avoid continuous indicator draw.
+In this profile GNSS is sampled once during boot with `AT+CGNSPWR=1`, the resulting trusted location/time is kept in memory and logs, and the modem is powered down after POST. Runtime Azure/SMS paths wake LTE only for the transfer window and power it down again. `power.solar_auto_optimize` does not override `health.led`; when USB/VBUS power is present, the status LED is held on.
 
 The measured solar logs support stopping at `18:00`: it avoids evening discharge and preserves battery for the next boot. Starting at `08:00` is practical, but `09:00` or `10:00` is safer for maximum autonomy. For a harsher winter or cloudy profile, use `deep_sleep_start_hour=17` and `deep_sleep_end_hour=10`.
 

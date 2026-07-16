@@ -1875,6 +1875,23 @@ static void poll_status_led()
     static bool led_on = false;
     static uint32_t cycle_start_ms = 0;
     static bool last_error_state = false;
+    static uint32_t last_power_check_ms = 0;
+    static bool usb_power_present = false;
+
+    uint32_t now = millis();
+    if (last_power_check_ms == 0 || now - last_power_check_ms >= 1000UL) {
+        PowerSnapshot snapshot;
+        usb_power_present = power_read_snapshot(snapshot) && snapshot.mains_power_present;
+        last_power_check_ms = now;
+    }
+
+    if (usb_power_present) {
+        if (!led_on) {
+            led_on = true;
+            stepper_set_status_led(true);
+        }
+        return;
+    }
 
     if (g_config.health.led == 0) {
         if (led_on) {
@@ -1884,7 +1901,6 @@ static void poll_status_led()
         return;
     }
 
-    uint32_t now = millis();
     bool error_state = g_health.has_error;
     if (cycle_start_ms == 0 || error_state != last_error_state || now - cycle_start_ms >= 10000UL) {
         cycle_start_ms = now;
