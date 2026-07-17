@@ -1926,6 +1926,7 @@ void setup()
     delay(2000);
 
     print_system_info();
+    stepper_run_post_start_led_signal();
 
     Serial.println("POST: SD card init begin");
     g_post.sd_card = sdcard_init();
@@ -2042,7 +2043,6 @@ void setup()
     print_post_line("web_service", web_started, web_started ? "http port 80" : "disabled/unavailable");
 
     stepper_init(g_config.stepper);
-    stepper_run_status_led_post_test();
     if (g_config.stepper.post_test_enabled) {
         stepper_run_post_test_cycle();
     } else {

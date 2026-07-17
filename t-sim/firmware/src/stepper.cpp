@@ -71,6 +71,25 @@ static inline void set_right_led(bool active)
     digitalWrite(PIN_RIGHT_LED, active ? HIGH : LOW);
 }
 
+static void prepare_status_led()
+{
+    pinMode(PIN_RIGHT_LED, OUTPUT);
+    set_right_led(false);
+}
+
+static void flash_status_led(uint8_t flashes, uint16_t on_ms, uint16_t off_ms)
+{
+    prepare_status_led();
+
+    for (uint8_t i = 0; i < flashes; i++) {
+        set_right_led(true);
+        delay(on_ms);
+        set_right_led(false);
+        if (i + 1 < flashes)
+            delay(off_ms);
+    }
+}
+
 static inline void drive_a_pol(int pol)
 {
     if (pol > 0) {
@@ -174,8 +193,7 @@ void stepper_init(const StepperConfig &config)
     pinMode(PIN_BIN2, OUTPUT);
     pinMode(PIN_PWMA, OUTPUT);
     pinMode(PIN_PWMB, OUTPUT);
-    pinMode(PIN_RIGHT_LED, OUTPUT);
-    set_right_led(false);
+    prepare_status_led();
 
     ledcSetup(PWM_CH_A, PWM_FREQ_HZ, PWM_BITS);
     ledcSetup(PWM_CH_B, PWM_FREQ_HZ, PWM_BITS);
@@ -239,18 +257,20 @@ void stepper_run_post_test_cycle()
     Serial.printf("STEPPER: POST test cycle %s\n", ok ? "done" : "skipped");
 }
 
+void stepper_run_post_start_led_signal()
+{
+    Serial.printf("STEPPER: POST start status LED signal begin gpio=%d\n", PIN_RIGHT_LED);
+    flash_status_led(3, 150, 150);
+    Serial.println("STEPPER: POST start status LED signal done");
+}
+
 void stepper_run_status_led_post_test()
 {
     if (!g_stepper_ready)
         return;
 
     Serial.printf("STEPPER: status LED POST test begin gpio=%d\n", PIN_RIGHT_LED);
-    for (uint8_t i = 0; i < 3; i++) {
-        set_right_led(true);
-        delay(150);
-        set_right_led(false);
-        delay(150);
-    }
+    flash_status_led(3, 150, 150);
     Serial.println("STEPPER: status LED POST test done");
 }
 

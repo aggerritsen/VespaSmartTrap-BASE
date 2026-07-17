@@ -58,7 +58,7 @@ For more board details, see the [LilyGO T-SIM7080G repository](https://github.co
 
 On startup, `setup()` performs:
 
-1. Starts USB serial and prints system information.
+1. Starts USB serial, prints system information, and flashes the D0/status LED three times to mark POST start.
 2. Initializes SD-MMC with custom T-SIM7080G-S3 pins.
 3. Ensures `/config.json` exists, adds any missing default fields, and loads config.
 4. Enables modem rails through the AXP2101 PMU.
