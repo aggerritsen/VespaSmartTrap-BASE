@@ -156,12 +156,12 @@ The stepper settings currently used are:
     "post_test_enabled": true
   },
   "inference": {
-    "confidence_threshold": 0.80,
+    "confidence_threshold": 0.745,
     "doubtful_confidence_threshold": 0.70,
     "upload_doubtful_to_azure": true,
     "detected_class": 3,
-    "occurrence": 3,
-    "occurrence_window_seconds": 30
+    "occurrence": 2,
+    "occurrence_window_seconds": 5
   }
 }
 ```
@@ -278,7 +278,7 @@ Low-battery protection is independent of the night window. When a battery is pre
 
 `power.reboot_cron` is a five-field cron-like schedule checked once per loop minute after valid system time is available. It supports `*`, single values, comma lists, ranges, and `*/step`. For example, `"0 12 * * *"` reboots daily at noon. Leave it empty to disable scheduled reboot. `power.reboot_after_deep_sleep_wakeup=true` performs one immediate restart after waking from a firmware-entered deep sleep, then clears the RTC marker to avoid a reboot loop.
 
-Rotated log uploads are controlled separately by `logging.upload_enabled`, `logging.upload_interval_minutes`, `logging.upload_max_files_per_run`, and `logging.upload_min_battery_percent`. They use `azure.logs_prefix` and delete local archive files after a successful upload.
+Rotated log uploads are controlled separately by `logging.upload_enabled`, `logging.upload_interval_minutes`, `logging.upload_max_files_per_run`, and `logging.upload_min_battery_percent`. They use `azure.logs_prefix` and delete local archive files after a successful upload. Each upload run first tries to upload one `frames`, one `health`, and one `power` archive before using remaining slots for the oldest pending archives.
 
 During POST, missing `/config.json` fields are added back to the SD card from `config.example.json` without overwriting existing values. Existing values and extra user fields are preserved.
 

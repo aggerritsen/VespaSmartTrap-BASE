@@ -26,6 +26,8 @@ Thumbs.db
 # Large datasets stay opt-in
 data/sample-images/**
 !data/sample-images/.gitkeep
+tools/azure_download/downloads/
+tools/azure_download/reports/
 
 create_github_repo.ps1
 

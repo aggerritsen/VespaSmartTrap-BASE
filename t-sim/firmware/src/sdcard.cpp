@@ -1529,6 +1529,15 @@ static bool is_archive_jsonl_file(const char *name)
     return len > 6 && strcmp(name + len - 6, ".jsonl") == 0;
 }
 
+static bool archive_name_matches_prefix(const char *name, const char *name_prefix)
+{
+    if (!name_prefix || !name_prefix[0])
+        return true;
+
+    size_t prefix_len = strlen(name_prefix);
+    return strncmp(name, name_prefix, prefix_len) == 0;
+}
+
 static const char *sd_basename(const char *path)
 {
     if (!path)
@@ -1537,7 +1546,7 @@ static const char *sd_basename(const char *path)
     return last ? last + 1 : path;
 }
 
-bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len)
+bool sdcard_find_next_log_archive_by_prefix(const char *name_prefix, char *out_path, size_t out_path_len)
 {
     if (!out_path || out_path_len == 0)
         return false;
@@ -1585,7 +1594,9 @@ bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len)
                     strlcpy(name, sd_basename(file.name()), sizeof(name));
                     file.close();
 
-                    if (!is_dir && is_archive_jsonl_file(name)) {
+                    if (!is_dir &&
+                        is_archive_jsonl_file(name) &&
+                        archive_name_matches_prefix(name, name_prefix)) {
                         if (!best_path[0] ||
                             strcmp(day, best_day) < 0 ||
                             (strcmp(day, best_day) == 0 && strcmp(name, best_name) < 0)) {
@@ -1611,6 +1622,11 @@ bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len)
 
     strlcpy(out_path, best_path, out_path_len);
     return out_path[0] != '\0';
+}
+
+bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len)
+{
+    return sdcard_find_next_log_archive_by_prefix(nullptr, out_path, out_path_len);
 }
 
 bool sdcard_remove_file(const char *path)

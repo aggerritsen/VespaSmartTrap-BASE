@@ -97,12 +97,12 @@
     "post_test_enabled": true
   },
   "inference": {
-    "confidence_threshold": 0.80,
+    "confidence_threshold": 0.745,
     "doubtful_confidence_threshold": 0.70,
     "upload_doubtful_to_azure": true,
     "detected_class": 3,
-    "occurrence": 3,
-    "occurrence_window_seconds": 30,
+    "occurrence": 2,
+    "occurrence_window_seconds": 5,
     "class_names": [
       {
         "class": 0,

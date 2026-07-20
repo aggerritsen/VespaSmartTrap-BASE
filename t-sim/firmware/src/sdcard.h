@@ -25,11 +25,11 @@ struct InferenceConfig {
         char display_name[33];
     };
 
-    float confidence_threshold = 0.89f;
+    float confidence_threshold = 0.745f;
     float doubtful_confidence_threshold = 0.70f;
     int16_t detected_class = 3;
-    uint16_t occurrence = 3;
-    uint16_t occurrence_window_seconds = 30;
+    uint16_t occurrence = 2;
+    uint16_t occurrence_window_seconds = 5;
     bool upload_doubtful_to_azure = true;
     uint8_t class_name_count = 4;
     ClassName class_names[MAX_CLASS_NAMES] = {
@@ -184,4 +184,5 @@ void sdcard_set_logging_policy(const LoggingConfig &logging);
 bool sdcard_append_log(const char *path, const String &text);
 bool sdcard_write_log(const char *path, const String &text);
 bool sdcard_find_next_log_archive(char *out_path, size_t out_path_len);
+bool sdcard_find_next_log_archive_by_prefix(const char *name_prefix, char *out_path, size_t out_path_len);
 bool sdcard_remove_file(const char *path);

@@ -327,6 +327,46 @@ static bool log_archive_upload_power_allowed()
     return true;
 }
 
+static int8_t upload_next_rotated_log_archive(const char *name_prefix, uint8_t &uploaded)
+{
+    char local_path[128] = {0};
+    if (!sdcard_find_next_log_archive_by_prefix(name_prefix, local_path, sizeof(local_path)))
+        return 0;
+
+    char blob_name[176] = {0};
+    if (!build_log_archive_blob_name(local_path, blob_name, sizeof(blob_name))) {
+        Serial.printf("LOG_UPLOAD: skipped reason=bad_archive_path file=%s prefix=%s\n",
+                      local_path,
+                      name_prefix ? name_prefix : "*");
+        return -1;
+    }
+
+    Serial.printf("LOG_UPLOAD: begin file=%s blob=%s prefix=%s\n",
+                  local_path,
+                  blob_name,
+                  name_prefix ? name_prefix : "*");
+    bool ok = modem_upload_azure_blob_from_sd_runtime(local_path,
+                                                      blob_name,
+                                                      g_config.modem.apn,
+                                                      g_config.modem.operator_auto_select,
+                                                      true,
+                                                      (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
+                                                      true,
+                                                      (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
+                                                      "application/x-ndjson");
+    if (!ok) {
+        Serial.printf("LOG_UPLOAD: FAIL file=%s retry=later\n", local_path);
+        return -1;
+    }
+
+    bool removed = sdcard_remove_file(local_path);
+    Serial.printf("LOG_UPLOAD: PASS blob=%s local_delete=%s\n",
+                  blob_name,
+                  removed ? "OK" : "FAILED");
+    uploaded++;
+    return 1;
+}
+
 static void maybe_upload_rotated_logs()
 {
     if (!g_config.logging.upload_enabled)
@@ -361,40 +401,23 @@ static void maybe_upload_rotated_logs()
         max_files = 1;
 
     uint8_t uploaded = 0;
-    for (uint8_t i = 0; i < max_files; i++) {
-        char local_path[128] = {0};
-        if (!sdcard_find_next_log_archive(local_path, sizeof(local_path))) {
+    bool stop_uploads = false;
+    const char *fair_prefixes[] = {"frames", "health", "power"};
+    for (size_t i = 0; i < sizeof(fair_prefixes) / sizeof(fair_prefixes[0]) && uploaded < max_files; i++) {
+        int8_t result = upload_next_rotated_log_archive(fair_prefixes[i], uploaded);
+        if (result < 0) {
+            stop_uploads = true;
+            break;
+        }
+    }
+
+    while (!stop_uploads && uploaded < max_files) {
+        int8_t result = upload_next_rotated_log_archive(nullptr, uploaded);
+        if (result <= 0) {
             if (uploaded == 0)
                 Serial.println("LOG_UPLOAD: no archive files pending");
             break;
         }
-
-        char blob_name[176] = {0};
-        if (!build_log_archive_blob_name(local_path, blob_name, sizeof(blob_name))) {
-            Serial.printf("LOG_UPLOAD: skipped reason=bad_archive_path file=%s\n", local_path);
-            break;
-        }
-
-        Serial.printf("LOG_UPLOAD: begin file=%s blob=%s\n", local_path, blob_name);
-        bool ok = modem_upload_azure_blob_from_sd_runtime(local_path,
-                                                          blob_name,
-                                                          g_config.modem.apn,
-                                                          g_config.modem.operator_auto_select,
-                                                          true,
-                                                          (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
-                                                          true,
-                                                          (uint32_t)g_config.azure.runtime_connect_timeout_seconds * 1000UL,
-                                                          "application/x-ndjson");
-        if (!ok) {
-            Serial.printf("LOG_UPLOAD: FAIL file=%s retry=later\n", local_path);
-            break;
-        }
-
-        bool removed = sdcard_remove_file(local_path);
-        Serial.printf("LOG_UPLOAD: PASS blob=%s local_delete=%s\n",
-                      blob_name,
-                      removed ? "OK" : "FAILED");
-        uploaded++;
     }
 
     Serial.printf("LOG_UPLOAD: done uploaded=%u max=%u\n", uploaded, max_files);
