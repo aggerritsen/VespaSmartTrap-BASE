@@ -171,8 +171,9 @@ static void uart_state_tx_send_byte(uint8_t value) {
 #ifdef VST_UART_JPEG_TX
 // JPEG capture policy:
 // - LED/state decision uses kMinDetectionConfidence (0.60).
-// - JPEG send decision uses a much lower threshold so we can capture "unknown insects". [to be verified]
-static const float kMinCaptureConfidence = 0.10f;
+// - JPEG send decision mirrors the T-SIM positive filter so GV2 only CRCs/sends useful candidates.
+static const float kMinCaptureConfidence = 0.745f;
+static const uint8_t kCaptureClassIdx = 3;
 
 // Binary framing to the host MCU:
 // Header: 'V' 'S' 'T' 'J' + state(1) + class_idx(1) + conf_u8(1) + bbox_x/y/w/h_u16_le + len_u32_le(4) + crc32_u32_le(4)
@@ -376,57 +377,38 @@ static void i2c_slave_init_for_detection_state(void) {
 
 static void update_i2c_detection_state_from_algo_result(void) {
     uint8_t new_state = 0;
-    float best_conf = 0.0f;
-    uint8_t best_class = 0;
-    uint16_t best_bbox_x = 0;
-    uint16_t best_bbox_y = 0;
-    uint16_t best_bbox_w = 0;
-    uint16_t best_bbox_h = 0;
-    float best_box_conf = 0.0f;
-    uint8_t best_box_class = 0;
-    uint16_t best_box_x = 0;
-    uint16_t best_box_y = 0;
-    uint16_t best_box_w = 0;
-    uint16_t best_box_h = 0;
-    bool saw_any_above_capture = false;
+    bool saw_capture_candidate = false;
+    float best_capture_conf = 0.0f;
+    uint16_t best_capture_x = 0;
+    uint16_t best_capture_y = 0;
+    uint16_t best_capture_w = 0;
+    uint16_t best_capture_h = 0;
     for (int i = 0; i < MAX_TRACKED_YOLOV8_ALGO_RES; ++i) {
         const float conf = algoresult_yolo11n_ob.obr[i].confidence;
+        const uint8_t class_idx = (uint8_t)algoresult_yolo11n_ob.obr[i].class_idx;
         const uint16_t bbox_x = clamp_u32_to_u16(algoresult_yolo11n_ob.obr[i].bbox.x);
         const uint16_t bbox_y = clamp_u32_to_u16(algoresult_yolo11n_ob.obr[i].bbox.y);
         const uint16_t bbox_w = clamp_u32_to_u16(algoresult_yolo11n_ob.obr[i].bbox.width);
         const uint16_t bbox_h = clamp_u32_to_u16(algoresult_yolo11n_ob.obr[i].bbox.height);
         const bool has_box = bbox_w > 0 && bbox_h > 0;
 
-        if (conf > best_conf) {
-            best_conf = conf;
-            best_class = (uint8_t)algoresult_yolo11n_ob.obr[i].class_idx;
-            best_bbox_x = bbox_x;
-            best_bbox_y = bbox_y;
-            best_bbox_w = bbox_w;
-            best_bbox_h = bbox_h;
-        }
-
-        if (has_box && conf > best_box_conf) {
-            best_box_conf = conf;
-            best_box_class = (uint8_t)algoresult_yolo11n_ob.obr[i].class_idx;
-            best_box_x = bbox_x;
-            best_box_y = bbox_y;
-            best_box_w = bbox_w;
-            best_box_h = bbox_h;
-        }
-
 #ifdef VST_UART_JPEG_TX
-        if (conf >= kMinCaptureConfidence) {
-            saw_any_above_capture = true;
+        if (has_box && class_idx == kCaptureClassIdx && conf >= kMinCaptureConfidence &&
+            (!saw_capture_candidate || conf > best_capture_conf)) {
+            saw_capture_candidate = true;
+            best_capture_conf = conf;
+            best_capture_x = bbox_x;
+            best_capture_y = bbox_y;
+            best_capture_w = bbox_w;
+            best_capture_h = bbox_h;
         }
 #endif
 
         if (conf < kMinDetectionConfidence) {
             continue;
         }
-        if (algoresult_yolo11n_ob.obr[i].class_idx == 3) {
+        if (class_idx == 3) {
             new_state = 1;
-            // don't break: we still want best_conf/best_class for JPEG metadata
         } else if (new_state == 0) {
             new_state = 2;
         }
@@ -442,19 +424,16 @@ static void update_i2c_detection_state_from_algo_result(void) {
 #endif
 
 #ifdef VST_UART_JPEG_TX
-    // Only send JPEG when something is detected above the low capture threshold.
-    // IMPORTANT: this is intentionally independent from the LED/state threshold (0.60).
-    // We want JPEG capture for low-confidence/unknown insects too.
-    if (saw_any_above_capture) {
-        const bool use_box_result = best_box_w > 0 && best_box_h > 0;
-        const uint8_t conf_u8 = clamp_conf_to_u8(use_box_result ? best_box_conf : best_conf);
+    // Only send JPEG after the target class clears the capture threshold; CRC work happens inside send.
+    if (saw_capture_candidate) {
+        const uint8_t conf_u8 = clamp_conf_to_u8(best_capture_conf);
         uart_send_jpeg_frame(new_state,
-                             use_box_result ? best_box_class : best_class,
+                             kCaptureClassIdx,
                              conf_u8,
-                             use_box_result ? best_box_x : best_bbox_x,
-                             use_box_result ? best_box_y : best_bbox_y,
-                             use_box_result ? best_box_w : best_bbox_w,
-                             use_box_result ? best_box_h : best_bbox_h,
+                             best_capture_x,
+                             best_capture_y,
+                             best_capture_w,
+                             best_capture_h,
                              jpeg_addr, jpeg_sz);
     }
 #endif

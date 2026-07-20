@@ -392,6 +392,53 @@ static bool is_sim_ready_for_network()
     return false;
 }
 
+static bool is_sim_ready_for_ltem_validation()
+{
+    Serial.println("MODEM: SIM readiness check before LTE-M validation");
+    modem.sendAT("+CPIN?");
+
+    uint32_t start = millis();
+    while (millis() - start < 3000UL) {
+        while (modem.stream.available()) {
+            String line = modem.stream.readStringUntil('\n');
+            line.trim();
+            if (!line.length())
+                continue;
+
+            Serial.printf("MODEM: SIM readiness rx [%s]\n", line.c_str());
+            if (line.startsWith("+CPIN:")) {
+                String status = line.substring(strlen("+CPIN:"));
+                status.trim();
+                if (status == "READY") {
+                    modem.waitResponse(200);
+                    Serial.println("MODEM: SIM readiness READY");
+                    return true;
+                }
+
+                modem.waitResponse(200);
+                Serial.printf("MODEM: LTE-M validation skipped reason=sim_not_ready status=%s\n", status.c_str());
+                return false;
+            }
+
+            if (line.indexOf("SIM not inserted") >= 0 || line.indexOf("NOTINSERTED") >= 0) {
+                modem.waitResponse(200);
+                Serial.println("MODEM: LTE-M validation skipped reason=sim_not_inserted");
+                return false;
+            }
+
+            if (line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR")) {
+                modem.waitResponse(200);
+                Serial.printf("MODEM: LTE-M validation skipped reason=sim_status_error line=[%s]\n", line.c_str());
+                return false;
+            }
+        }
+        delay(10);
+    }
+
+    Serial.println("MODEM: LTE-M validation skipped reason=sim_status_timeout");
+    return false;
+}
+
 static bool set_pdp_context_ip(const char *apn)
 {
     if (!apn || !apn[0])
@@ -1175,6 +1222,9 @@ bool modem_validate_ltem(const char *apn,
                          const char *lookup_secondary,
                          uint32_t network_timeout_ms)
 {
+    if (!is_sim_ready_for_ltem_validation())
+        return false;
+
     return modem_validate_ltem_attempt("configured",
                                        apn,
                                        lookup_primary,
@@ -1188,6 +1238,11 @@ bool modem_validate_ltem(const char *apn,
 
 bool modem_validate_ltem_apn_candidates(ModemConfig &config, uint32_t network_timeout_ms)
 {
+    if (!is_sim_ready_for_ltem_validation()) {
+        append_apn_probe_log("autodetect_end", 0, "all", "", "fail", "sim_not_ready");
+        return false;
+    }
+
     if (!config.apn_autodetect) {
         Serial.printf("MODEM: APN autodetect disabled; using configured apn=%s\n", config.apn);
         return modem_validate_ltem_attempt("configured",

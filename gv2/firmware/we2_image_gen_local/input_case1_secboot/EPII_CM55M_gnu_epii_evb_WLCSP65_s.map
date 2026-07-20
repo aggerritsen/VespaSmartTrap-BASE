@@ -5,17 +5,17 @@ Sections:
 Idx Name          Size      VMA       LMA       File off  Algn
   0 .table        000007c0  10000000  10000000  00001000  2**2
                   CONTENTS, ALLOC, LOAD, READONLY, DATA
-  1 .text         00029efc  100007c0  100007c0  000017c0  2**3
+  1 .text         00029e20  100007c0  100007c0  000017c0  2**3
                   CONTENTS, ALLOC, LOAD, READONLY, CODE
   2 .rodata       00006285  30000000  30000000  0002c000  2**3
                   CONTENTS, ALLOC, LOAD, READONLY, DATA
-  3 .ARM.exidx    00000008  1002a6bc  1002a6bc  0002b6bc  2**2
+  3 .ARM.exidx    00000008  1002a5e0  1002a5e0  0002b5e0  2**2
                   CONTENTS, ALLOC, LOAD, READONLY, DATA
-  4 .copy.table   0000000c  1002a6c4  1002a6c4  0002b6c4  2**0
+  4 .copy.table   0000000c  1002a5e8  1002a5e8  0002b5e8  2**0
                   CONTENTS, ALLOC, LOAD, DATA
   5 .data         0000065c  30006288  30006288  00032288  2**3
                   CONTENTS, ALLOC, LOAD, DATA
-  6 .zero.table   00000008  1002a6d0  1002a6d0  0002b6d0  2**0
+  6 .zero.table   00000008  1002a5f4  1002a5f4  0002b5f4  2**0
                   CONTENTS, ALLOC, LOAD, DATA
   7 .bss          0000743c  300068e8  300068e8  000328e4  2**3
                   ALLOC

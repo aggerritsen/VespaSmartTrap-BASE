@@ -2002,15 +2002,21 @@ void setup()
             }
         }
 
-        Serial.println("POST: modem timestamp begin; waiting for network time");
-        if (modem_get_timestamp(g_timestamp, sizeof(g_timestamp), network_timeout_ms)) {
-            g_post.modem_network = true;
-            g_post.modem_time = true;
-            Serial.printf("POST: modem_timestamp [%s]\n", g_timestamp);
-            g_post.system_time = set_system_time_from_timestamp(g_timestamp);
-            print_post_line("system_time", g_post.system_time);
+        bool should_query_modem_time = g_config.modem.mode == 1 ||
+                                       (g_config.modem.mode == 2 && g_post.modem_ltem);
+        if (should_query_modem_time) {
+            Serial.println("POST: modem timestamp begin; waiting for network time");
+            if (modem_get_timestamp(g_timestamp, sizeof(g_timestamp), network_timeout_ms)) {
+                g_post.modem_network = true;
+                g_post.modem_time = true;
+                Serial.printf("POST: modem_timestamp [%s]\n", g_timestamp);
+                g_post.system_time = set_system_time_from_timestamp(g_timestamp);
+                print_post_line("system_time", g_post.system_time);
+            } else {
+                print_post_line("modem_timestamp", false, "unavailable");
+            }
         } else {
-            print_post_line("modem_timestamp", false, "unavailable");
+            print_post_warn("modem_timestamp", "skipped; LTE-M unavailable");
         }
 
         if (g_config.modem.mode == 2)
