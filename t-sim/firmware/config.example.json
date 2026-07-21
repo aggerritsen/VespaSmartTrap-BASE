@@ -92,13 +92,13 @@
     "speed_steps_per_second": 400,
     "rotation_degrees": 90,
     "steps_per_revolution": 2048,
-    "reverse_wait_ms": 1000,
+    "reverse_wait_ms": 5000,
     "start_direction": "cw",
     "post_test_enabled": true
   },
   "inference": {
     "confidence_threshold": 0.745,
-    "doubtful_confidence_threshold": 0.70,
+    "doubtful_confidence_threshold": 0.60,
     "upload_doubtful_to_azure": true,
     "detected_class": 3,
     "occurrence": 3,

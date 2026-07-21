@@ -5,7 +5,7 @@ struct StepperConfig {
     uint16_t speed_steps_per_second = 400;
     uint16_t rotation_degrees = 90;
     uint16_t steps_per_revolution = 2048;
-    uint16_t reverse_wait_ms = 1000;
+    uint16_t reverse_wait_ms = 5000;
     char start_direction[17] = "cw";
     bool post_test_enabled = true;
 };
@@ -26,7 +26,7 @@ struct InferenceConfig {
     };
 
     float confidence_threshold = 0.745f;
-    float doubtful_confidence_threshold = 0.70f;
+    float doubtful_confidence_threshold = 0.60f;
     int16_t detected_class = 3;
     uint16_t occurrence = 3;
     uint16_t occurrence_window_seconds = 2;
