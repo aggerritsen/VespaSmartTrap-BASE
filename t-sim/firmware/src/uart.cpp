@@ -8,6 +8,7 @@
 #include "sdcard.h"
 #include "stepper.h"
 #include "web.h"
+#include "power.h"
 
 #ifndef GV2_UART_RX_GPIO_CFG
   #define GV2_UART_RX_GPIO_CFG 16
@@ -546,6 +547,21 @@ static bool frame_matches_doubtful_confidence(bool valid)
            confidence < inference.confidence_threshold;
 }
 
+static bool usb_power_present_now()
+{
+    PowerSnapshot snapshot;
+    return power_read_snapshot(snapshot) && snapshot.mains_power_present;
+}
+
+static bool doubtful_image_upload_enabled_now()
+{
+    const BaseConfig *cfg = log_config;
+    if (!cfg)
+        return false;
+
+    return cfg->inference.upload_doubtful_to_azure || usb_power_present_now();
+}
+
 static uint16_t configured_occurrence()
 {
     const BaseConfig *cfg = log_config;
@@ -954,6 +970,7 @@ static void append_frame_log(bool saved,
                              bool valid,
                              bool filter_match,
                              bool doubtful_match,
+                             bool upload_doubtful_effective,
                              bool detection_match,
                              bool actuated,
                              bool crc_ok,
@@ -1017,8 +1034,10 @@ static void append_frame_log(bool saved,
     s += filter_match ? "true" : "false";
     s += ",\"doubtful_match\":";
     s += doubtful_match ? "true" : "false";
-    s += ",\"upload_doubtful_to_azure\":";
+    s += ",\"upload_doubtful_to_azure_configured\":";
     s += inference.upload_doubtful_to_azure ? "true" : "false";
+    s += ",\"upload_doubtful_to_azure\":";
+    s += upload_doubtful_effective ? "true" : "false";
     s += ",\"detection_match\":";
     s += detection_match ? "true" : "false";
     s += "},\"box\":{\"x\":";
@@ -1273,10 +1292,10 @@ void gv2_uart_poll()
 
                 uint16_t occurrence = configured_occurrence();
                 bool detection_match = filter_match && occurrence_count >= occurrence;
+                bool upload_doubtful_effective = doubtful_image_upload_enabled_now();
                 bool save_doubtful = !detection_match &&
                                      doubtful_match &&
-                                     log_config &&
-                                     log_config->inference.upload_doubtful_to_azure;
+                                     upload_doubtful_effective;
                 bool actuated = false;
                 char filename[64] = {0};
                 bool saved = false;
@@ -1332,6 +1351,7 @@ void gv2_uart_poll()
                                  valid,
                                  filter_match,
                                  doubtful_match,
+                                 upload_doubtful_effective,
                                  detection_match,
                                  actuated,
                                  crc_ok,

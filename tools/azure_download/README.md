@@ -50,5 +50,5 @@ python .\tools\azure_download\analyze_downloads.py
 Plot confidence over time with simulated detection events:
 
 ```powershell
-python .\tools\azure_download\plot_detection_timeline.py --threshold 0.745 --occurrence 2 --window-seconds 5
+python .\tools\azure_download\plot_detection_timeline.py --threshold 0.70 --occurrence 2 --window-seconds 5
 ```

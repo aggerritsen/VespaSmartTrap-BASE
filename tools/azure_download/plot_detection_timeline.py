@@ -184,7 +184,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Plot confidence timeline and simulated T-SIM detections.")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=f"Downloaded data root (default: {DEFAULT_ROOT})")
     parser.add_argument("--since", default="2026-07-19T00:00:00", help="Only include frames at or after this ISO timestamp.")
-    parser.add_argument("--threshold", type=float, default=0.745, help="Positive confidence threshold to plot.")
+    parser.add_argument("--threshold", type=float, default=0.70, help="Positive confidence threshold to plot.")
     parser.add_argument("--occurrence", type=int, default=2, help="Matching frames required for detection.")
     parser.add_argument("--window-seconds", type=int, default=5, help="Occurrence window in seconds.")
     parser.add_argument("--target-class", type=int, default=3, help="Target class index.")
