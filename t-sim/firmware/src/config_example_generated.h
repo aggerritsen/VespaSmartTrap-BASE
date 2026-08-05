@@ -104,6 +104,7 @@ static constexpr const char *CONFIG_EXAMPLE_JSON =
     "  \"inference\": {\n"
     "    \"confidence_threshold\": 0.70,\n"
     "    \"doubtful_confidence_threshold\": 0.60,\n"
+    "    \"photo_mode\": 0,\n"
     "    \"upload_doubtful_to_azure\": true,\n"
     "    \"detected_class\": 3,\n"
     "    \"occurrence\": 2,\n"

@@ -562,6 +562,28 @@ static bool doubtful_image_upload_enabled_now()
     return cfg->inference.upload_doubtful_to_azure || usb_power_present_now();
 }
 
+static uint8_t configured_photo_mode()
+{
+    const BaseConfig *cfg = log_config;
+    uint8_t mode = cfg ? cfg->inference.photo_mode : InferenceConfig{}.photo_mode;
+    return mode > 2 ? 0 : mode;
+}
+
+static bool frame_matches_photo_capture(bool valid, uint8_t photo_mode)
+{
+    if (!valid || photo_mode == 0)
+        return false;
+
+    const BaseConfig *cfg = log_config;
+    InferenceConfig inference = cfg ? cfg->inference : InferenceConfig{};
+    float confidence = (float)jpeg_rx.frame_conf_u8 / 255.0f;
+    float threshold = photo_mode == 1
+        ? inference.confidence_threshold
+        : inference.doubtful_confidence_threshold;
+
+    return confidence >= threshold;
+}
+
 static uint16_t configured_occurrence()
 {
     const BaseConfig *cfg = log_config;
@@ -971,6 +993,7 @@ static void append_frame_log(bool saved,
                              bool filter_match,
                              bool doubtful_match,
                              bool upload_doubtful_effective,
+                             bool photo_capture_match,
                              bool detection_match,
                              bool actuated,
                              bool crc_ok,
@@ -1034,6 +1057,10 @@ static void append_frame_log(bool saved,
     s += filter_match ? "true" : "false";
     s += ",\"doubtful_match\":";
     s += doubtful_match ? "true" : "false";
+    s += ",\"photo_mode\":";
+    s += inference.photo_mode;
+    s += ",\"photo_capture_match\":";
+    s += photo_capture_match ? "true" : "false";
     s += ",\"upload_doubtful_to_azure_configured\":";
     s += inference.upload_doubtful_to_azure ? "true" : "false";
     s += ",\"upload_doubtful_to_azure\":";
@@ -1288,14 +1315,23 @@ void gv2_uart_poll()
                 bool valid = jpeg_rx.frame_has_crc32 && crc_ok && jpeg_sanity_check(jpeg_rx.jpeg_buf, payload_len);
                 bool filter_match = frame_matches_class_and_confidence(valid);
                 bool doubtful_match = frame_matches_doubtful_confidence(valid);
-                uint16_t occurrence_count = update_detection_occurrence(filter_match);
-
+                uint8_t photo_mode = configured_photo_mode();
+                bool photo_capture_match = frame_matches_photo_capture(valid, photo_mode);
                 uint16_t occurrence = configured_occurrence();
-                bool detection_match = filter_match && occurrence_count >= occurrence;
+                uint16_t occurrence_count = 0;
+                bool detection_match = false;
+                if (photo_mode == 0) {
+                    occurrence_count = update_detection_occurrence(filter_match);
+                    detection_match = filter_match && occurrence_count >= occurrence;
+                } else {
+                    reset_detection_occurrence();
+                }
                 bool upload_doubtful_effective = doubtful_image_upload_enabled_now();
                 bool save_doubtful = !detection_match &&
+                                     photo_mode == 0 &&
                                      doubtful_match &&
                                      upload_doubtful_effective;
+                bool save_capture = photo_mode != 0 && photo_capture_match;
                 bool actuated = false;
                 char filename[64] = {0};
                 bool saved = false;
@@ -1323,6 +1359,21 @@ void gv2_uart_poll()
                     }
                     if (saved) {
                         azure_result = upload_runtime_azure_saved_image(filename);
+                    }
+                } else if (save_capture) {
+                    saved = sdcard_save_jpeg(jpeg_rx.image_counter,
+                                             jpeg_rx.jpeg_buf,
+                                             payload_len,
+                                             filename,
+                                             sizeof(filename),
+                                             jpeg_rx.frame_class_idx,
+                                             (float)jpeg_rx.frame_conf_u8 / 255.0f);
+                    if (saved) {
+                        Serial.printf("GV2: photo capture saved file=%s mode=%u class=%u conf=%.3f\n",
+                                      filename,
+                                      photo_mode,
+                                      jpeg_rx.frame_class_idx,
+                                      (float)jpeg_rx.frame_conf_u8 / 255.0f);
                     }
                 } else if (save_doubtful) {
                     saved = sdcard_save_jpeg(jpeg_rx.image_counter,
@@ -1352,6 +1403,7 @@ void gv2_uart_poll()
                                  filter_match,
                                  doubtful_match,
                                  upload_doubtful_effective,
+                                 photo_capture_match,
                                  detection_match,
                                  actuated,
                                  crc_ok,
@@ -1386,7 +1438,7 @@ void gv2_uart_poll()
 
                 jpeg_rx.receiving_jpeg = false;
                 stats.jpeg_frames++;
-                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s filter_match=%s doubtful_match=%s occurrence=%u/%u occurrence_window_s=%lu detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu azure=%s azure_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
+                Serial.printf("GV2: jpeg complete #%lu len=%lu jpeg_len=%u crc_rx=%08lX crc_calc=%08lX crc_ok=%s protocol=%s state=%u class=%u conf_u8=%u conf=%.3f box=[%u,%u,%u,%u] ram_valid=%s photo_mode=%u photo_capture_match=%s filter_match=%s doubtful_match=%s occurrence=%u/%u occurrence_window_s=%lu detection_match=%s saved=%s file=%s actuator=%s sms=%s sms_cooldown_remaining_s=%lu azure=%s azure_cooldown_remaining_s=%lu soi=%02X%02X eoi=%02X%02X\n",
                               (unsigned long)jpeg_rx.image_counter,
                               (unsigned long)jpeg_rx.frame_len,
                               (unsigned)payload_len,
@@ -1403,6 +1455,8 @@ void gv2_uart_poll()
                               jpeg_rx.frame_bbox_w,
                               jpeg_rx.frame_bbox_h,
                               valid ? "YES" : "NO",
+                              photo_mode,
+                              photo_capture_match ? "YES" : "NO",
                               filter_match ? "YES" : "NO",
                               doubtful_match ? "YES" : "NO",
                               jpeg_rx.detection_streak,

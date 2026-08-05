@@ -1010,6 +1010,9 @@ static String make_post_summary_text()
     s += "inference_confidence_threshold=";
     s += String(g_config.inference.confidence_threshold, 3);
     s += "\n";
+    s += "inference_photo_mode=";
+    s += g_config.inference.photo_mode;
+    s += "\n";
     s += "inference_detected_class=";
     s += g_config.inference.detected_class;
     s += "\n";
@@ -1152,7 +1155,8 @@ static void print_post_summary()
                   g_config.azure.photos_prefix,
                   g_config.azure.logs_prefix,
                   g_config.azure.log_post_test_enabled ? "YES" : "NO");
-    Serial.printf("POST: inference_filter  [class=%d positive>=%.3f doubtful>=%.3f upload_doubtful_to_azure=%s occurrence=%u window=%u sec]\n",
+    Serial.printf("POST: inference_filter  [mode=%u class=%d positive>=%.3f doubtful>=%.3f upload_doubtful_to_azure=%s occurrence=%u window=%u sec]\n",
+                  g_config.inference.photo_mode,
                   g_config.inference.detected_class,
                   g_config.inference.confidence_threshold,
                   g_config.inference.doubtful_confidence_threshold,

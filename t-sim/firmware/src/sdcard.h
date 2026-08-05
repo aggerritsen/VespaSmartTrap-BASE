@@ -27,6 +27,7 @@ struct InferenceConfig {
 
     float confidence_threshold = 0.70f;
     float doubtful_confidence_threshold = 0.60f;
+    uint8_t photo_mode = 0; // 0=normal, 1=capture >= confidence, 2=capture >= doubtful
     int16_t detected_class = 3;
     uint16_t occurrence = 2;
     uint16_t occurrence_window_seconds = 5;
