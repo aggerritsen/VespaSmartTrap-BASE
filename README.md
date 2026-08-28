@@ -51,6 +51,14 @@ T-SIM7080G-S3 base unit
 
 The T-SIM7080G-S3 is the base controller. The Grove Vision AI V2 is treated as an attached vision module, not as the system broker. The custom PCB provides the electrical and mechanical interface between the base, vision module, and actuator hardware references.
 
+## 3D Housing
+
+The physical camera-trap enclosure is documented in [3D/README.md](3D/README.md). That folder contains the prototype field-test manual, mechanical drawing PDF, STEP assembly, U3D model, DWG drawing views, and prototype photos for the VespaSmartTrap-ONE housing.
+
+| Field prototype | Front/service side | Internal trap path |
+| --- | --- | --- |
+| ![VespaSmartTrap prototype in field conditions](3D/Trap01.jpeg) | ![VespaSmartTrap prototype front panel with electronics and actuator housing](3D/Trap02.jpeg) | ![VespaSmartTrap prototype internal funnel and trap jar path](3D/Trap03.jpeg) |
+
 ## Technical Specifications
 
 | Area | Specification |
@@ -86,6 +94,7 @@ t-sim/firmware/               PlatformIO firmware for the T-SIM7080G-S3 base
 t-sim/firmware/src/           Receiver firmware modules
 t-sim/firmware/platformio.ini ESP32-S3 build, upload, monitor, and library config
 t-sim/firmware/huge_app.csv   16 MB flash partition table
+3D/                           Mechanical housing docs, CAD assets, drawing views, and prototype photos
 docs/                         Architecture, protocol, hardware, GNSS, SD, and bring-up notes
 docs/hardware/                Datasheets, pinouts, photos, and hardware references
 gv2/firmware/                 Local isolated Grove Vision AI V2 firmware, image tools, and active model zoo
@@ -629,6 +638,7 @@ Third-party submodules and bundled tools may have their own licenses. Review tho
 ## Documentation Index
 
 - `t-sim/firmware/README.md`: detailed receiver firmware behavior, pins, protocol, validation, and source-file map.
+- `3D/README.md`: physical housing, CAD assets, mechanical drawing views, and prototype photos.
 - `docs/architecture.md`: high-level hardware and firmware architecture.
 - `docs/receiver-post.md`: POST behavior.
 - `docs/sd-card-layout.md`: SD output notes.
