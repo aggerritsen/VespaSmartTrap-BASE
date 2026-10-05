@@ -1318,14 +1318,8 @@ void gv2_uart_poll()
                 uint8_t photo_mode = configured_photo_mode();
                 bool photo_capture_match = frame_matches_photo_capture(valid, photo_mode);
                 uint16_t occurrence = configured_occurrence();
-                uint16_t occurrence_count = 0;
-                bool detection_match = false;
-                if (photo_mode == 0) {
-                    occurrence_count = update_detection_occurrence(filter_match);
-                    detection_match = filter_match && occurrence_count >= occurrence;
-                } else {
-                    reset_detection_occurrence();
-                }
+                uint16_t occurrence_count = update_detection_occurrence(filter_match);
+                bool detection_match = filter_match && occurrence_count >= occurrence;
                 bool upload_doubtful_effective = doubtful_image_upload_enabled_now();
                 bool save_doubtful = !detection_match &&
                                      photo_mode == 0 &&
