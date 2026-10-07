@@ -31,6 +31,7 @@
     "apn_test_all": false,
     "validate_http_egress": false,
     "operator_auto_select": true,
+    "preferred_radio_mode": "CAT-M",
     "keep_alive_after_post": false,
     "wake_for_runtime_sms": true,
     "apn_candidates": [

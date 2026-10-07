@@ -86,6 +86,22 @@ static void pwrkey_pulse()
     digitalWrite(MODEM_PWR, LOW);
 }
 
+static void drain_modem_input(uint32_t quiet_ms = 20, uint32_t max_ms = 200)
+{
+    if (!g_serial_ready)
+        return;
+
+    uint32_t start = millis();
+    uint32_t last_rx = millis();
+    while (millis() - start < max_ms && millis() - last_rx < quiet_ms) {
+        while (modem.stream.available()) {
+            (void)modem.stream.read();
+            last_rx = millis();
+        }
+        delay(1);
+    }
+}
+
 static bool pmu_enable_modem_rails()
 {
     Wire.begin(PMU_I2C_SDA, PMU_I2C_SCL);
@@ -155,11 +171,24 @@ static bool wait_for_at_ready(uint32_t timeout_ms)
 
 static bool is_registered_line(const String &line)
 {
-    int comma = line.lastIndexOf(',');
-    if (comma < 0) return false;
+    String value = line;
+    int colon = value.indexOf(':');
+    if (colon >= 0)
+        value = value.substring(colon + 1);
+    value.trim();
 
-    String stat = line.substring(comma + 1);
+    int first_comma = value.indexOf(',');
+    String stat;
+    if (first_comma < 0) {
+        stat = value;
+    } else {
+        int second_comma = value.indexOf(',', first_comma + 1);
+        stat = second_comma < 0
+            ? value.substring(first_comma + 1)
+            : value.substring(first_comma + 1, second_comma);
+    }
     stat.trim();
+    stat.replace("\"", "");
     return (stat == "1" || stat == "5");
 }
 
@@ -292,25 +321,42 @@ static bool parse_gnss_info_line(const String &line_in, ModemGnssInfo &info)
 static bool wait_for_network_registration(uint32_t timeout_ms)
 {
     uint32_t start = millis();
+    uint32_t last_progress_ms = start;
 
     while (millis() - start < timeout_ms)
     {
+        drain_modem_input();
         modem.sendAT("+CEREG?");
         if (modem.waitResponse(2000, "+CEREG:") == 1)
         {
             String line = modem.stream.readStringUntil('\n');
             line.trim();
-            if (is_registered_line(line))
+            if (is_registered_line(line)) {
+                modem.waitResponse(200);
                 return true;
+            }
+            modem.waitResponse(200);
         }
 
+        drain_modem_input();
         modem.sendAT("+CREG?");
         if (modem.waitResponse(2000, "+CREG:") == 1)
         {
             String line = modem.stream.readStringUntil('\n');
             line.trim();
-            if (is_registered_line(line))
+            if (is_registered_line(line)) {
+                modem.waitResponse(200);
                 return true;
+            }
+            modem.waitResponse(200);
+        }
+
+        uint32_t now = millis();
+        if (now - last_progress_ms >= 10000UL) {
+            Serial.printf("MODEM: registration waiting elapsed_ms=%lu timeout_ms=%lu\n",
+                          (unsigned long)(now - start),
+                          (unsigned long)timeout_ms);
+            last_progress_ms = now;
         }
 
         delay(1000);
@@ -330,6 +376,7 @@ bool modem_at_responsive(uint32_t timeout_ms)
 static bool read_at_prefixed_line(const char *cmd, const char *prefix, String &line, uint32_t timeout_ms)
 {
     line = "";
+    drain_modem_input();
     modem.sendAT(cmd);
     if (modem.waitResponse(timeout_ms, prefix) != 1)
         return false;
@@ -343,6 +390,7 @@ static bool read_at_prefixed_line(const char *cmd, const char *prefix, String &l
 static bool send_at_expect_ok(const char *cmd, uint32_t timeout_ms)
 {
     Serial.printf("MODEM: command AT%s\n", cmd);
+    drain_modem_input();
     modem.sendAT(cmd);
     int response = modem.waitResponse(timeout_ms);
     Serial.printf("MODEM: command AT%s result=%s\n", cmd, response == 1 ? "OK" : "FAIL");
@@ -363,6 +411,37 @@ static void log_operator_after_registration(const char *context)
     Serial.printf("MODEM: operator after registration context=%s +COPS:%s\n",
                   context && context[0] ? context : "-",
                   cops.c_str());
+}
+
+static bool apply_preferred_radio_mode(const char *mode)
+{
+    if (!mode || !mode[0])
+        return true;
+
+    int cmnb = 0;
+    if (strcasecmp(mode, "CAT-M") == 0 ||
+        strcasecmp(mode, "CATM") == 0 ||
+        strcasecmp(mode, "LTE-M") == 0) {
+        cmnb = 1;
+    } else if (strcasecmp(mode, "NB-IOT") == 0 ||
+               strcasecmp(mode, "NBIOT") == 0 ||
+               strcasecmp(mode, "NB") == 0) {
+        cmnb = 2;
+    } else if (strcasecmp(mode, "AUTO") == 0 ||
+               strcasecmp(mode, "BOTH") == 0) {
+        cmnb = 3;
+    } else {
+        Serial.printf("MODEM: unknown preferred radio mode '%s'; radio mode unchanged\n", mode);
+        return false;
+    }
+
+    Serial.printf("MODEM: preferred radio mode %s (CNMP=38 CMNB=%d)\n", mode, cmnb);
+    if (!send_at_expect_ok("+CNMP=38", 3000))
+        return false;
+
+    char cmd[16] = {0};
+    snprintf(cmd, sizeof(cmd), "+CMNB=%d", cmnb);
+    return send_at_expect_ok(cmd, 3000);
 }
 
 static int timeout_ms_to_connect_seconds(uint32_t timeout_ms)
@@ -682,8 +761,16 @@ static bool ensure_automatic_operator_selection(bool allow_change)
 {
     String cops;
     if (!read_at_prefixed_line("+COPS?", "+COPS:", cops, 5000)) {
-        Serial.println("MODEM: operator mode read unavailable; leaving operator selection unchanged");
-        return false;
+        if (!allow_change) {
+            Serial.println("MODEM: operator mode read unavailable; skipping AT+COPS=0 because modem.operator_auto_select=false");
+            return false;
+        }
+
+        if (!is_sim_ready_for_network())
+            return false;
+
+        Serial.println("MODEM: operator mode read unavailable; requesting AT+COPS=0");
+        return send_at_expect_ok("+COPS=0", 15000);
     }
 
     Serial.printf("MODEM: operator +COPS:%s\n", cops.c_str());
@@ -939,6 +1026,7 @@ static bool activate_app_pdp_context_bounded(const char *apn,
 static void print_at_raw_response(const char *label, const char *cmd, uint32_t timeout_ms)
 {
     Serial.printf("MODEM: %s query AT%s\n", label, cmd);
+    drain_modem_input();
     modem.sendAT(cmd);
 
     uint32_t start = millis();
@@ -983,6 +1071,7 @@ void modem_print_sim_network_status()
 
     print_at_raw_response("signal raw", "+CSQ", 3000);
     print_at_raw_response("operator raw", "+COPS?", 3000);
+    print_at_raw_response("system information raw", "+CPSI?", 3000);
     print_at_raw_response("EPS registration raw", "+CEREG?", 3000);
     print_at_raw_response("GPRS registration raw", "+CGREG?", 3000);
 
@@ -1032,7 +1121,7 @@ static bool modem_ping_host(const char *host)
     return false;
 }
 
-bool modem_init_early(bool operator_auto_select)
+bool modem_init_early(bool operator_auto_select, const char *preferred_radio_mode)
 {
     if (g_modem_initialized && g_serial_ready && modem.testAT(1000))
         return true;
@@ -1080,6 +1169,8 @@ bool modem_init_early(bool operator_auto_select)
     modem.sendAT("+CGREG=2");
     modem.waitResponse(2000);
     Serial.println("MODEM: registration detail reporting enabled");
+
+    apply_preferred_radio_mode(preferred_radio_mode);
 
     ensure_automatic_operator_selection(operator_auto_select);
 

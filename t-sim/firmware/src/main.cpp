@@ -899,6 +899,9 @@ static String make_post_summary_text()
     s += "modem_operator_auto_select=";
     s += g_config.modem.operator_auto_select ? "YES" : "NO";
     s += "\n";
+    s += "modem_preferred_radio_mode=";
+    s += g_config.modem.preferred_radio_mode;
+    s += "\n";
     s += "modem_apn_candidates=";
     s += g_config.modem.apn_candidate_count;
     s += "\n";
@@ -1574,7 +1577,8 @@ static void refresh_modem_health()
 
     if (!g_post.modem_ready) {
         Serial.println("MODEM: health recovery init begin");
-        g_post.modem_ready = modem_init_early(g_config.modem.operator_auto_select);
+        g_post.modem_ready = modem_init_early(g_config.modem.operator_auto_select,
+                                              g_config.modem.preferred_radio_mode);
         if (!g_post.modem_ready)
             return;
     }
@@ -1986,7 +1990,9 @@ void setup()
         }
     }
 
-    if (g_config.modem.mode != 0 && modem_init_early(g_config.modem.operator_auto_select)) {
+    if (g_config.modem.mode != 0 &&
+        modem_init_early(g_config.modem.operator_auto_select,
+                         g_config.modem.preferred_radio_mode)) {
         g_post.modem_ready = true;
         print_post_line("modem_at", true);
 

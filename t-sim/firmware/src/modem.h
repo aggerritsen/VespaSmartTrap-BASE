@@ -6,7 +6,7 @@
 #include "sdcard.h"
 
 // Returns true if PMU + modem AT are ready (or at least AT works).
-bool modem_init_early(bool operator_auto_select = false);
+bool modem_init_early(bool operator_auto_select = false, const char *preferred_radio_mode = "CAT-M");
 void modem_set_device_name(const char *device_name);
 
 // Tries to obtain a *plausible* modem timestamp via AT+CCLK?

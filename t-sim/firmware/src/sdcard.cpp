@@ -909,17 +909,23 @@ bool sdcard_load_config(BaseConfig &config)
     config.modem.operator_auto_select = modem["operator_auto_select"] | config.modem.operator_auto_select;
     config.modem.keep_alive_after_post = modem["keep_alive_after_post"] | config.modem.keep_alive_after_post;
     config.modem.wake_for_runtime_sms = modem["wake_for_runtime_sms"] | config.modem.wake_for_runtime_sms;
+    const char *preferred_radio_mode = modem["preferred_radio_mode"] | config.modem.preferred_radio_mode;
     const char *lookup_primary = modem["lookup_primary"] | config.modem.lookup_primary;
     const char *lookup_secondary = modem["lookup_secondary"] | config.modem.lookup_secondary;
     String modem_apn = apn;
+    String radio_mode = preferred_radio_mode;
     modem_apn.trim();
+    radio_mode.trim();
     strlcpy(config.modem.apn, modem_apn.c_str(), sizeof(config.modem.apn));
+    strlcpy(config.modem.preferred_radio_mode, radio_mode.c_str(), sizeof(config.modem.preferred_radio_mode));
     strlcpy(config.modem.lookup_primary, lookup_primary, sizeof(config.modem.lookup_primary));
     strlcpy(config.modem.lookup_secondary, lookup_secondary, sizeof(config.modem.lookup_secondary));
     if (config.modem.mode > 2)
         config.modem.mode = 0;
     if (!config.modem.apn[0])
         strlcpy(config.modem.apn, "internet.m2m", sizeof(config.modem.apn));
+    if (!config.modem.preferred_radio_mode[0])
+        strlcpy(config.modem.preferred_radio_mode, "CAT-M", sizeof(config.modem.preferred_radio_mode));
     if (!config.modem.lookup_primary[0])
         strlcpy(config.modem.lookup_primary, "1.1.1.1", sizeof(config.modem.lookup_primary));
     if (!config.modem.lookup_secondary[0])
@@ -1138,8 +1144,8 @@ bool sdcard_load_config(BaseConfig &config)
         Serial.println("SD: solar_auto_optimize enabled; applying low-power runtime policy");
         config.features.gnss_probe = true;
         config.time.allow_gnss_fallback = true;
-        if (config.time.network_timeout_seconds > 30)
-            config.time.network_timeout_seconds = 30;
+        if (config.time.network_timeout_seconds > 60)
+            config.time.network_timeout_seconds = 60;
         config.modem.keep_alive_after_post = false;
         config.modem.wake_for_runtime_sms = true;
         config.modem.apn_test_all = false;
@@ -1161,7 +1167,7 @@ bool sdcard_load_config(BaseConfig &config)
             config.azure.runtime_connect_timeout_seconds = 20;
     }
 
-    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_photo_mode=%u inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u inference_occurrence_window_seconds=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_solar_auto_optimize=%s power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_low_battery_sleep_percent=%u power_low_battery_wake_interval_minutes=%u power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u azure_photos_prefix=%s azure_logs_prefix=%s azure_log_post_test=%s sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
+    Serial.printf("SD: config loaded device=%s post_log=%s image_prefix=%s gnss_probe=%s ack_frames=%s uart_rx=%u uart_tx=%u uart_baud=%lu stepper_speed=%u stepper_rotation_deg=%u stepper_steps_per_rev=%u stepper_wait_ms=%u stepper_start_direction=%s stepper_post_test=%s inference_conf_threshold=%.3f inference_doubtful_conf_threshold=%.3f inference_photo_mode=%u inference_upload_doubtful_to_azure=%s inference_detected_class=%d inference_occurrence=%u inference_occurrence_window_seconds=%u web_mode=%u web_ssid=%s power_log_interval_seconds=%lu power_solar_auto_optimize=%s power_deep_sleep_mode=%u power_sleep_window=%02u:00-%02u:00 power_low_battery_sleep_percent=%u power_low_battery_wake_interval_minutes=%u power_reboot_cron=\"%s\" power_reboot_after_deep_sleep_wakeup=%s health_led=%u azure_cooldown_minutes=%lu azure_failure_cooldown_seconds=%lu azure_runtime_connect_timeout_seconds=%u azure_photos_prefix=%s azure_logs_prefix=%s azure_log_post_test=%s sms_enabled=%s sms_post_test=%s sms_runtime_settle_ms=%u sms_runtime_delay_after_detection_seconds=%u sms_runtime_submit_timeout_ms=%lu sms_cooldown_minutes=%lu sms_recipients=%u sms_failure_cooldown_seconds=%lu time_network_timeout_seconds=%u time_gnss_fallback=%s modem_mode=%u modem_apn=%s modem_direct_sms=%s modem_apn_autodetect=%s modem_apn_test_all=%s modem_validate_http_egress=%s modem_operator_auto_select=%s modem_preferred_radio_mode=%s modem_apn_candidates=%u modem_sim_profiles=%u modem_lookup_primary=%s modem_lookup_secondary=%s\n",
                   config.device_name,
                   config.logging.post_log,
                   config.logging.image_prefix,
@@ -1218,6 +1224,7 @@ bool sdcard_load_config(BaseConfig &config)
                   config.modem.apn_test_all ? "YES" : "NO",
                   config.modem.validate_http_egress ? "YES" : "NO",
                   config.modem.operator_auto_select ? "YES" : "NO",
+                  config.modem.preferred_radio_mode,
                   config.modem.apn_candidate_count,
                   config.modem.sim_profile_count,
                   config.modem.lookup_primary,

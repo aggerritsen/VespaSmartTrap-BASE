@@ -36,6 +36,7 @@ static constexpr const char *CONFIG_EXAMPLE_JSON =
     "    \"apn_test_all\": false,\n"
     "    \"validate_http_egress\": false,\n"
     "    \"operator_auto_select\": true,\n"
+    "    \"preferred_radio_mode\": \"CAT-M\",\n"
     "    \"keep_alive_after_post\": false,\n"
     "    \"wake_for_runtime_sms\": true,\n"
     "    \"apn_candidates\": [\n"

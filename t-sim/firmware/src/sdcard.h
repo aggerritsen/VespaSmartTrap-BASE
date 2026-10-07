@@ -110,6 +110,7 @@ struct ModemConfig {
     bool direct_sms = true;
     bool keep_alive_after_post = false;
     bool wake_for_runtime_sms = true;
+    char preferred_radio_mode[17] = "CAT-M";
     uint8_t apn_candidate_count = 0;
     ApnCandidate apn_candidates[MAX_APN_CANDIDATES];
     uint8_t sim_profile_count = 0;
