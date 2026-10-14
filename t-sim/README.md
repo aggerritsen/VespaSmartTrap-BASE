@@ -95,7 +95,21 @@ VSTJ + state_u8 + class_idx_u8 + conf_u8 + bbox_x_u16_le + bbox_y_u16_le + bbox_
 
 The heartbeat is expected only as an idle keepalive, about every 10 seconds when GV2 has not sent a state change, JPEG frame, or error frame.
 
-The JPEG header contains the best detection box from the GV2 inference result as `x,y,w,h` coordinates. The length is the trimmed JPEG payload length through the real `FFD9` marker. CRC32 is computed over exactly those JPEG bytes. The receiver prints completion output only after all `jpeg_len_u32_le` payload bytes are received, the CRC matches, and the configured inference filter has been evaluated.
+The `VSTJ` magic is followed by a 19-byte header:
+
+| Field | Size | Meaning |
+| --- | ---: | --- |
+| `state_u8` | 1 | GV2 detection state for this frame |
+| `class_idx_u8` | 1 | Selected YOLO class index |
+| `conf_u8` | 1 | Selected confidence, converted by the receiver as `conf_u8 / 255.0` |
+| `bbox_x_u16_le` | 2 | Selected box left pixel |
+| `bbox_y_u16_le` | 2 | Selected box top pixel |
+| `bbox_w_u16_le` | 2 | Selected box width in pixels |
+| `bbox_h_u16_le` | 2 | Selected box height in pixels |
+| `jpeg_len_u32_le` | 4 | Payload length in bytes |
+| `crc32_u32_le` | 4 | CRC32 over the JPEG payload |
+
+The box is the same selected detection candidate as `class_idx_u8` and `conf_u8`, so the receiver keeps class, confidence, and box paired in logs and filenames. The length is the trimmed JPEG payload length through the real `FFD9` marker. CRC32 is computed over exactly those JPEG bytes. The receiver prints completion output only after all `jpeg_len_u32_le` payload bytes are received, the CRC matches, and the configured inference filter has been evaluated.
 
 ## Receive State Machine
 
@@ -134,10 +148,14 @@ The firmware writes:
 /power.log
 /health.log
 /log/archive/<YYYYMMDD>/*.jsonl
-/vvel_0.859_20260716_225523_000004.jpg
+/vvel_0.859_b0011-0102-0125-0095_20260716_225523_000004.jpg
 ```
 
-`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `firmware/src/version.h`. `/frames.log`, `/health.log`, and `/power.log` are appended as JSON Lines and rotated into `/log/archive/<YYYYMMDD>/` according to the logging policy. JPEG filenames include the configured class short name, confidence, known system timestamp, and local receive counter. If system time is not available, the firmware falls back to an uptime-based name.
+`/config.json` is created with default future settings if it does not exist yet. `/post.log` is overwritten at boot and includes the software version from `firmware/src/version.h`. `/frames.log`, `/health.log`, and `/power.log` are appended as JSON Lines and rotated into `/log/archive/<YYYYMMDD>/` according to the logging policy. JPEG filenames include the configured class short name, confidence, selected box, known system timestamp, and local receive counter. The box segment is `_b<x>-<y>-<w>-<h>` with four-digit zero-padded pixel coordinates from the `VSTJ` header. If system time is not available, the firmware falls back to an uptime-based name:
+
+```text
+/vvel_0.859_b0011-0102-0125-0095_uptime_0000000000_000004.jpg
+```
 
 The repository includes `config.example.json` as a clean, human-readable baseline for validating SD card configs. It intentionally contains no comment helper fields and no legacy GV2 reset settings.
 

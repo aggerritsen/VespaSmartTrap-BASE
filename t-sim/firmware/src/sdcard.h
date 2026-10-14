@@ -177,7 +177,11 @@ bool sdcard_save_jpeg(uint32_t frame_id,
                       char *out_path = nullptr,
                       size_t out_path_len = 0,
                       int16_t class_idx = -1,
-                      float confidence = -1.0f);
+                      float confidence = -1.0f,
+                      uint16_t bbox_x = 0,
+                      uint16_t bbox_y = 0,
+                      uint16_t bbox_w = 0,
+                      uint16_t bbox_h = 0);
 bool sdcard_begin_jpeg(uint32_t frame_id);
 bool sdcard_write_jpeg_chunk(const uint8_t *data, size_t len);
 bool sdcard_finish_jpeg();

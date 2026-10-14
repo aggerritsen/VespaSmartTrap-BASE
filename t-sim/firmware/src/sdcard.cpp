@@ -18,7 +18,7 @@
 
 static bool sd_ok = false;
 static File active_jpeg_file;
-static char active_jpeg_path[64] = {0};
+static char active_jpeg_path[128] = {0};
 static char configured_image_prefix[33] = "/frame_";
 static InferenceConfig::ClassName configured_class_names[InferenceConfig::MAX_CLASS_NAMES] = {
     {0, "amel", "Apis mellifera"},
@@ -428,7 +428,15 @@ static void format_class_name(int16_t class_idx, char *out, size_t out_len)
         strlcpy(out, "clsunk", out_len);
 }
 
-static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id, int16_t class_idx = -1, float confidence = -1.0f)
+static void make_jpeg_path(char *path,
+                           size_t path_len,
+                           uint32_t frame_id,
+                           int16_t class_idx = -1,
+                           float confidence = -1.0f,
+                           uint16_t bbox_x = 0,
+                           uint16_t bbox_y = 0,
+                           uint16_t bbox_w = 0,
+                           uint16_t bbox_h = 0)
 {
     time_t now = time(nullptr);
     struct tm tm{};
@@ -443,9 +451,13 @@ static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id, int16
         if (confidence >= 0.0f) {
             snprintf(path,
                      path_len,
-                     "/%s_0.%03d_%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
+                     "/%s_0.%03d_b%04u-%04u-%04u-%04u_%04d%02d%02d_%02d%02d%02d_%06lu.jpg",
                      class_name,
                      conf_milli,
+                     (unsigned)bbox_x,
+                     (unsigned)bbox_y,
+                     (unsigned)bbox_w,
+                     (unsigned)bbox_h,
                      tm.tm_year + 1900,
                      tm.tm_mon + 1,
                      tm.tm_mday,
@@ -470,7 +482,17 @@ static void make_jpeg_path(char *path, size_t path_len, uint32_t frame_id, int16
     }
 
     if (confidence >= 0.0f) {
-        snprintf(path, path_len, "/%s_0.%03d_uptime_%010lu_%06lu.jpg", class_name, conf_milli, millis(), (unsigned long)frame_id);
+        snprintf(path,
+                 path_len,
+                 "/%s_0.%03d_b%04u-%04u-%04u-%04u_uptime_%010lu_%06lu.jpg",
+                 class_name,
+                 conf_milli,
+                 (unsigned)bbox_x,
+                 (unsigned)bbox_y,
+                 (unsigned)bbox_w,
+                 (unsigned)bbox_h,
+                 millis(),
+                 (unsigned long)frame_id);
     } else {
         snprintf(path, path_len, "%suptime_%010lu_%06lu.jpg", configured_image_prefix, millis(), (unsigned long)frame_id);
     }
@@ -1743,13 +1765,17 @@ bool sdcard_save_jpeg(uint32_t frame_id,
                       char *out_path,
                       size_t out_path_len,
                       int16_t class_idx,
-                      float confidence)
+                      float confidence,
+                      uint16_t bbox_x,
+                      uint16_t bbox_y,
+                      uint16_t bbox_w,
+                      uint16_t bbox_h)
 {
     if (!sdcard_ensure_ready())
         return false;
 
-    char path[64];
-    make_jpeg_path(path, sizeof(path), frame_id, class_idx, confidence);
+    char path[128];
+    make_jpeg_path(path, sizeof(path), frame_id, class_idx, confidence, bbox_x, bbox_y, bbox_w, bbox_h);
     if (out_path && out_path_len > 0) {
         strlcpy(out_path, path, out_path_len);
     }

@@ -149,6 +149,8 @@ VSTJ + state_u8 + class_idx_u8 + conf_u8
 
 The GV2 heartbeat is an idle keepalive: it is sent after about 10 seconds of no other UART frames from GV2. A state change, JPEG frame, or error frame resets the heartbeat timer.
 
+The `VSTJ` magic is followed by a 19-byte header and then the JPEG payload. Header fields are little-endian where wider than one byte: `state_u8`, `class_idx_u8`, `conf_u8`, `bbox_x_u16`, `bbox_y_u16`, `bbox_w_u16`, `bbox_h_u16`, `jpeg_len_u32`, and `crc32_u32`. `conf_u8` is converted to a floating confidence with `conf_u8 / 255.0`. The bounding box is the same selected detection candidate as the confidence value, so filenames and logs keep the paired confidence/box information together.
+
 The JPEG payload length is the trimmed JPEG length through the actual `FFD9` marker. CRC32 is calculated over exactly those JPEG bytes. The receiver only treats a frame as complete after the declared payload has arrived, CRC32 matches, and the JPEG structure is valid.
 
 ## Detection And Actuation
@@ -175,11 +177,11 @@ The firmware creates or writes these files on the SD card:
 /post.log                     Boot POST summary, overwritten each boot
 /frames.log                   JSON Lines frame and detection log
 /power.log                    JSON Lines power telemetry log
-/vvel_0.859_YYYYMMDD_HHMMSS_000123.jpg Saved JPEGs with class short name and confidence
-/vvel_0.859_uptime_0000000000_000123.jpg Fallback JPEG naming when time is unavailable
+/vvel_0.859_b0011-0102-0125-0095_YYYYMMDD_HHMMSS_000123.jpg Saved JPEGs with class, confidence, and box
+/vvel_0.859_b0011-0102-0125-0095_uptime_0000000000_000123.jpg Fallback JPEG naming when time is unavailable
 ```
 
-`/frames.log` includes device identity, firmware version, GNSS fields, inference state, bounding box, positive/doubtful filter result, CRC result, actuator result, SMS result, Azure result, cooldown status, and saved filename.
+The filename box segment is `_b<x>-<y>-<w>-<h>` with four-digit zero-padded pixel coordinates from the `VSTJ` header. `/frames.log` includes device identity, firmware version, GNSS fields, inference state, bounding box, positive/doubtful filter result, CRC result, actuator result, SMS result, Azure result, cooldown status, and saved filename.
 
 The firmware removes legacy Azure queue files (`/azure_queue.log`, `/azure_queue.work`, `/azure_queue.tmp`) on SD mount. New firmware does not use an upload queue.
 

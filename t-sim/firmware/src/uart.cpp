@@ -1327,7 +1327,7 @@ void gv2_uart_poll()
                                      upload_doubtful_effective;
                 bool save_capture = photo_mode != 0 && photo_capture_match;
                 bool actuated = false;
-                char filename[64] = {0};
+                char filename[128] = {0};
                 bool saved = false;
                 SmsNotifyResult sms_result;
                 AzureUploadResult azure_result;
@@ -1346,7 +1346,11 @@ void gv2_uart_poll()
                                              filename,
                                              sizeof(filename),
                                              jpeg_rx.frame_class_idx,
-                                             (float)jpeg_rx.frame_conf_u8 / 255.0f);
+                                             (float)jpeg_rx.frame_conf_u8 / 255.0f,
+                                             jpeg_rx.frame_bbox_x,
+                                             jpeg_rx.frame_bbox_y,
+                                             jpeg_rx.frame_bbox_w,
+                                             jpeg_rx.frame_bbox_h);
                     bool azure_ready_after_sms = saved && azure_runtime_upload_ready_now();
                     if (saved) {
                         sms_result = send_detection_sms_notifications(filename, payload_len, azure_ready_after_sms);
@@ -1361,7 +1365,11 @@ void gv2_uart_poll()
                                              filename,
                                              sizeof(filename),
                                              jpeg_rx.frame_class_idx,
-                                             (float)jpeg_rx.frame_conf_u8 / 255.0f);
+                                             (float)jpeg_rx.frame_conf_u8 / 255.0f,
+                                             jpeg_rx.frame_bbox_x,
+                                             jpeg_rx.frame_bbox_y,
+                                             jpeg_rx.frame_bbox_w,
+                                             jpeg_rx.frame_bbox_h);
                     if (saved) {
                         Serial.printf("GV2: photo capture saved file=%s mode=%u class=%u conf=%.3f\n",
                                       filename,
@@ -1376,7 +1384,11 @@ void gv2_uart_poll()
                                              filename,
                                              sizeof(filename),
                                              jpeg_rx.frame_class_idx,
-                                             (float)jpeg_rx.frame_conf_u8 / 255.0f);
+                                             (float)jpeg_rx.frame_conf_u8 / 255.0f,
+                                             jpeg_rx.frame_bbox_x,
+                                             jpeg_rx.frame_bbox_y,
+                                             jpeg_rx.frame_bbox_w,
+                                             jpeg_rx.frame_bbox_h);
                     if (saved) {
                         Serial.printf("GV2: doubtful image saved for Azure file=%s conf=%.3f threshold=%.3f positive_threshold=%.3f\n",
                                       filename,
